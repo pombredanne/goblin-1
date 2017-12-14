@@ -116,14 +116,9 @@ macro_rules! elf_sym_std_impl {
             }
         }
 
-        #[cfg(feature = "std")]
-        pub use self::std::*;
-
-        #[cfg(feature = "std")]
-        mod std {
+        if_std! {
             use elf::sym::Sym as ElfSym;
-            use super::*;
-            use elf::error::*;
+            use error::Result;
 
             use core::fmt;
             use core::slice;
@@ -131,8 +126,6 @@ macro_rules! elf_sym_std_impl {
             use std::fs::File;
             use std::io::{Read, Seek};
             use std::io::SeekFrom::Start;
-
-            use plain::Methods;
 
             impl Sym {
                 /// Checks whether this `Sym` has `STB_GLOBAL`/`STB_WEAK` bind and a `st_value` of 0
@@ -192,15 +185,17 @@ macro_rules! elf_sym_std_impl {
                 slice::from_raw_parts(symp, count)
             }
 
-            pub fn from_fd<'a>(fd: &mut File, offset: usize, count: usize) -> Result<Vec<Sym>> {
+            pub fn from_fd(fd: &mut File, offset: usize, count: usize) -> Result<Vec<Sym>> {
                 // TODO: AFAIK this shouldn't work, since i pass in a byte size...
                 let mut syms = vec![Sym::default(); count];
                 try!(fd.seek(Start(offset as u64)));
-                try!(fd.read(syms.as_mut_bytes()));
+                unsafe {
+                    try!(fd.read(plain::as_mut_bytes(&mut *syms)));
+                }
                 syms.dedup();
                 Ok(syms)
             }
-        }
+        } // end if_std
     };
 }
 
@@ -266,17 +261,13 @@ pub mod sym64 {
     elf_sym_std_impl!(u64);
 }
 
-#[cfg(feature = "std")]
-pub use self::std::*;
-
-#[cfg(feature = "std")]
-mod std {
-    use super::*;
-
-    use core::fmt;
-    use scroll::{self, ctx};
+if_std! {
+    use scroll::{ctx, Pread};
+    use scroll::ctx::SizeWith;
+    use core::fmt::{self, Debug};
     use core::result;
     use container::{Ctx, Container};
+    use error::Result;
 
     #[derive(Default, PartialEq, Clone)]
     /// A unified Sym definition - convertable to and from 32-bit and 64-bit variants
@@ -319,8 +310,8 @@ mod std {
         }
         #[cfg(feature = "endian_fd")]
         /// Parse `count` vector of ELF symbols from `offset`
-        pub fn parse<S: AsRef<[u8]>>(bytes: S, mut offset: usize, count: usize, ctx: Ctx) -> ::error::Result<Vec<Sym>> {
-            use scroll::Gread;
+        pub fn parse(bytes: &[u8], mut offset: usize, count: usize, ctx: Ctx) -> Result<Vec<Sym>> {
+            use scroll::Pread;
             let mut syms = Vec::with_capacity(count);
             for _ in 0..count {
                 let sym = bytes.gread_with(&mut offset, ctx)?;
@@ -360,37 +351,154 @@ mod std {
         }
     }
 
-    impl<'a> ctx::TryFromCtx<'a, (usize, Ctx)> for Sym {
-        type Error = scroll::Error;
-        fn try_from_ctx(bytes: &'a [u8], (offset, Ctx { container, le}): (usize, Ctx)) -> result::Result<Self, Self::Error> {
+    impl<'a> ctx::TryFromCtx<'a, Ctx> for Sym {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_from_ctx(bytes: &'a [u8], Ctx { container, le}: Ctx) -> result::Result<(Self, Self::Size), Self::Error> {
             use scroll::Pread;
             let sym = match container {
                 Container::Little => {
-                    bytes.pread_with::<sym32::Sym>(offset, le)?.into()
+                    (bytes.pread_with::<sym32::Sym>(0, le)?.into(), sym32::SIZEOF_SYM)
                 },
                 Container::Big => {
-                    bytes.pread_with::<sym64::Sym>(offset, le)?.into()
+                    (bytes.pread_with::<sym64::Sym>(0, le)?.into(), sym64::SIZEOF_SYM)
                 }
             };
             Ok(sym)
         }
     }
 
-    impl ctx::TryIntoCtx<(usize, Ctx)> for Sym {
-        type Error = scroll::Error;
-        fn try_into_ctx(self, mut bytes: &mut [u8], (offset, Ctx {container, le}): (usize, Ctx)) -> result::Result<(), Self::Error> {
+    impl ctx::TryIntoCtx<Ctx> for Sym {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) -> result::Result<Self::Size, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {
                     let sym: sym32::Sym = self.into();
-                    bytes.pwrite_with(sym, offset, le)?;
+                    Ok(bytes.pwrite_with(sym, 0, le)?)
                 },
                 Container::Big => {
                     let sym: sym64::Sym = self.into();
-                    bytes.pwrite_with(sym, offset, le)?;
+                    Ok(bytes.pwrite_with(sym, 0, le)?)
                 }
             }
-            Ok(())
         }
     }
-}
+
+    impl ctx::IntoCtx<Ctx> for Sym {
+        fn into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) {
+            use scroll::Pwrite;
+            match container {
+                Container::Little => {
+                    let sym: sym32::Sym = self.into();
+                    bytes.pwrite_with(sym, 0, le).unwrap();
+                },
+                Container::Big => {
+                    let sym: sym64::Sym = self.into();
+                    bytes.pwrite_with(sym, 0, le).unwrap();
+                }
+            }
+        }
+    }
+
+    #[derive(Default)]
+    /// An ELF symbol table, allowing lazy iteration over symbols
+    pub struct Symtab<'a> {
+        bytes: &'a [u8],
+        count: usize,
+        ctx: Ctx,
+        start: usize,
+        end: usize,
+    }
+
+    impl<'a> Debug for Symtab<'a> {
+        fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            let len = self.bytes.len();
+            fmt.debug_struct("Symtab")
+                .field("bytes", &len)
+                .field("range", &format!("{:#x}..{:#x}", self.start, self.end))
+                .field("count", &self.count)
+                .field("Symbols", &self.to_vec())
+                .finish()
+        }
+    }
+
+    impl<'a> Symtab<'a> {
+        /// Parse a table of `count` ELF symbols from `offset`.
+        pub fn parse(bytes: &'a [u8], offset: usize, count: usize, ctx: Ctx) -> Result<Symtab<'a>> {
+            let size = count * Sym::size_with(&ctx);
+            // TODO: make this a better error message when too large
+            let bytes = bytes.pread_with(offset, size)?;
+            Ok(Symtab { bytes, count, ctx, start: offset, end: offset+size })
+        }
+
+        /// Try to parse a single symbol from the binary, at `index`.
+        pub fn get(&self, index: usize) -> Option<Sym> {
+            if index >= self.count {
+                None
+            } else {
+                Some(self.bytes.pread_with(index * Sym::size_with(&self.ctx), self.ctx).unwrap())
+            }
+        }
+
+        /// The number of symbols in the table.
+        #[inline]
+        pub fn len(&self) -> usize {
+            self.count
+        }
+
+        /// Iterate over all symbols.
+        pub fn iter(&self) -> SymIterator<'a> {
+            self.into_iter()
+        }
+
+        /// Parse all symbols into a vector.
+        pub fn to_vec(&self) -> Vec<Sym> {
+            self.iter().collect()
+        }
+    }
+
+    impl<'a, 'b> IntoIterator for &'b Symtab<'a> {
+        type Item = <SymIterator<'a> as Iterator>::Item;
+        type IntoIter = SymIterator<'a>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            SymIterator {
+                bytes: self.bytes,
+                offset: 0,
+                index: 0,
+                count: self.count,
+                ctx: self.ctx,
+            }
+        }
+    }
+
+    /// An iterator over symbols in an ELF symbol table
+    pub struct SymIterator<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+        index: usize,
+        count: usize,
+        ctx: Ctx,
+    }
+
+    impl<'a> Iterator for SymIterator<'a> {
+        type Item = Sym;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.index >= self.count {
+                None
+            } else {
+                self.index += 1;
+                Some(self.bytes.gread_with(&mut self.offset, self.ctx).unwrap())
+            }
+        }
+    }
+
+    impl<'a> ExactSizeIterator for SymIterator<'a> {
+        fn len(&self) -> usize {
+            self.count - self.index
+        }
+    }
+} // end if_std

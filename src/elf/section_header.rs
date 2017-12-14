@@ -151,35 +151,52 @@ pub const SHT_HIUSER: u32 = 0x8fffffff;
 
 // Legal values for sh_flags (section flags)
 /// Writable.
-pub const SHF_WRITE: u32 = 1 << 0;
+pub const SHF_WRITE: u32 = 0x1;
 /// Occupies memory during execution.
-pub const SHF_ALLOC: u32 = 1 << 1;
+pub const SHF_ALLOC: u32 = 0x2;
 /// Executable.
-pub const SHF_EXECINSTR: u32 = 1 << 2;
+pub const SHF_EXECINSTR: u32 = 0x4;
 /// Might be merged.
-pub const SHF_MERGE: u32 = 1 << 4;
+pub const SHF_MERGE: u32 = 0x10;
 /// Contains nul-terminated strings.
-pub const SHF_STRINGS: u32 = 1 << 5;
+pub const SHF_STRINGS: u32 = 0x20;
 /// `sh_info' contains SHT index.
-pub const SHF_INFO_LINK: u32 = 1 << 6;
+pub const SHF_INFO_LINK: u32 = 0x40;
 /// Preserve order after combining.
-pub const SHF_LINK_ORDER: u32 = 1 << 7;
+pub const SHF_LINK_ORDER: u32 = 0x80;
 /// Non-standard OS specific handling required.
-pub const SHF_OS_NONCONFORMING: u32 = 1 << 8;
+pub const SHF_OS_NONCONFORMING: u32 = 0x100;
 /// Section is member of a group.
-pub const SHF_GROUP: u32 = 1 << 9;
+pub const SHF_GROUP: u32 = 0x200;
 /// Section hold thread-local data.
-pub const SHF_TLS: u32 = 1 << 10;
+pub const SHF_TLS: u32 = 0x400;
 /// Section with compressed data.
-pub const SHF_COMPRESSED: u32 = 1 << 11;
+pub const SHF_COMPRESSED: u32 = 0x800;
 /// OS-specific..
 pub const SHF_MASKOS: u32 = 0x0ff00000;
 /// Processor-specific.
 pub const SHF_MASKPROC: u32 = 0xf0000000;
 /// Special ordering requirement (Solaris).
 pub const SHF_ORDERED: u32 = 1 << 30;
+/// Number of "regular" section header flags
+pub const SHF_NUM_REGULAR_FLAGS: usize = 12;
 // /// Section is excluded unless referenced or allocated (Solaris).
 // pub const SHF_EXCLUDE: u32 = 1U << 31;
+
+pub const SHF_FLAGS: [u32; SHF_NUM_REGULAR_FLAGS] = [
+    SHF_WRITE,
+    SHF_ALLOC,
+    SHF_EXECINSTR,
+    SHF_MERGE,
+    SHF_STRINGS,
+    SHF_INFO_LINK,
+    SHF_LINK_ORDER,
+    SHF_OS_NONCONFORMING,
+    SHF_GROUP,
+    SHF_TLS,
+    SHF_COMPRESSED,
+    SHF_ORDERED,
+];
 
 pub fn sht_to_str(sht: u32) -> &'static str {
     match sht {
@@ -220,6 +237,25 @@ pub fn sht_to_str(sht: u32) -> &'static str {
     }
 }
 
+pub fn shf_to_str(shf: u32) -> &'static str {
+    match shf {
+        SHF_WRITE => "SHF_WRITE",
+        SHF_ALLOC => "SHF_ALLOC",
+        SHF_EXECINSTR => "SHF_EXECINSTR",
+        SHF_MERGE => "SHF_MERGE",
+        SHF_STRINGS => "SHF_STRINGS",
+        SHF_INFO_LINK => "SHF_INFO_LINK",
+        SHF_LINK_ORDER => "SHF_LINK_ORDER",
+        SHF_OS_NONCONFORMING => "SHF_OS_NONCONFORMING",
+        SHF_GROUP => "SHF_GROUP",
+        SHF_TLS => "SHF_TLS",
+        SHF_COMPRESSED => "SHF_COMPRESSED",
+        //SHF_MASKOS..SHF_MASKPROC => "SHF_OSFLAG",
+        SHF_ORDERED => "SHF_ORDERED",
+        _ => "SHF_UNKNOWN"
+    }
+}
+
 macro_rules! elf_section_header_std_impl { ($size:ty) => {
 
     #[cfg(test)]
@@ -231,21 +267,15 @@ macro_rules! elf_section_header_std_impl { ($size:ty) => {
         }
     }
 
-    #[cfg(feature = "std")]
-    pub use self::std::*;
-
-    #[cfg(feature = "std")]
-    mod std {
-
+    if_std! {
         use elf::section_header::SectionHeader as ElfSectionHeader;
-        use super::*;
-        use elf::error::*;
+        use error::Result;
 
         use std::fs::File;
         use std::io::{Read, Seek};
         use std::io::SeekFrom::Start;
 
-        use plain::Methods;
+        use plain::Plain;
 
         impl From<SectionHeader> for ElfSectionHeader {
             fn from(sh: SectionHeader) -> Self {
@@ -283,19 +313,20 @@ macro_rules! elf_section_header_std_impl { ($size:ty) => {
         impl SectionHeader {
             pub fn from_bytes(bytes: &[u8], shnum: usize) -> Vec<SectionHeader> {
                 let mut shdrs = vec![SectionHeader::default(); shnum];
-                // FIXME: copy_from_slice() panics if the slices are not equal length
-                shdrs.as_mut_bytes().copy_from_slice(bytes);
+                shdrs.copy_from_bytes(bytes).expect("buffer is too short for given number of entries");
                 shdrs
             }
 
             pub fn from_fd(fd: &mut File, offset: u64, shnum: usize) -> Result<Vec<SectionHeader>> {
                 let mut shdrs = vec![SectionHeader::default(); shnum];
                 try!(fd.seek(Start(offset)));
-                try!(fd.read(shdrs.as_mut_bytes()));
+                unsafe {
+                    try!(fd.read(plain::as_mut_bytes(&mut *shdrs)));
+                }
                 Ok(shdrs)
             }
         }
-    }
+    } // end if_std
 };}
 
 
@@ -325,15 +356,12 @@ pub mod section_header64 {
 // Std/analysis/Unified Structs
 ///////////////////////////////
 
-#[cfg(feature = "std")]
-pub use self::std::*;
-
-#[cfg(feature = "std")]
-mod std {
-    use super::*;
+if_std! {
+    use error;
     use core::fmt;
     use core::result;
-    use scroll::{self, ctx};
+    use core::ops::Range;
+    use scroll::ctx;
     use container::{Container, Ctx};
 
     #[derive(Default, PartialEq, Clone)]
@@ -362,6 +390,12 @@ mod std {
     }
 
     impl SectionHeader {
+        /// Return the size of the underlying program header, given a `container`
+        #[inline]
+        pub fn size(ctx: &Ctx) -> usize {
+            use scroll::ctx::SizeWith;
+            Self::size_with(ctx)
+        }
         pub fn new() -> Self {
             SectionHeader {
                 sh_name: 0,
@@ -376,15 +410,48 @@ mod std {
                 sh_entsize: 0,
             }
         }
+        /// Returns this section header's file offset range
+        pub fn file_range(&self) -> Range<usize> {
+            (self.sh_offset as usize..self.sh_offset as usize + self.sh_size as usize)
+        }
+        /// Returns this section header's virtual memory range
+        pub fn vm_range(&self) -> Range<usize> {
+            (self.sh_addr as usize..self.sh_addr as usize + self.sh_size as usize)
+        }
+        /// Parse `count` section headers from `bytes` at `offset`, using the given `ctx`
         #[cfg(feature = "endian_fd")]
-        pub fn parse(bytes: &[u8], mut offset: usize, count: usize, ctx: Ctx) -> ::error::Result<Vec<SectionHeader>> {
-            use scroll::Gread;
+        pub fn parse(bytes: &[u8], mut offset: usize, count: usize, ctx: Ctx) -> error::Result<Vec<SectionHeader>> {
+            use scroll::Pread;
             let mut section_headers = Vec::with_capacity(count);
             for _ in 0..count {
                 let shdr = bytes.gread_with(&mut offset, ctx)?;
                 section_headers.push(shdr);
             }
             Ok(section_headers)
+        }
+        pub fn check_size(&self, size: usize) -> error::Result<()> {
+            if self.sh_type == SHT_NOBITS {
+                return Ok(());
+            }
+            let (end, overflow) = self.sh_offset.overflowing_add(self.sh_size);
+            if overflow || end > size as u64 {
+                let message = format!("Section {} size ({}) + offset ({}) is out of bounds. Overflowed: {}",
+                    self.sh_name, self.sh_offset, self.sh_size, overflow);
+                return Err(error::Error::Malformed(message));
+            }
+            Ok(())
+        }
+        pub fn is_relocation(&self) -> bool {
+            self.sh_type == SHT_RELA
+        }
+        pub fn is_executable(&self) -> bool {
+            self.is_alloc() && self.sh_flags as u32 & SHF_EXECINSTR == SHF_EXECINSTR
+        }
+        pub fn is_writable(&self) -> bool {
+            self.is_alloc() && self.sh_flags as u32 & SHF_WRITE == SHF_WRITE
+        }
+        pub fn is_alloc(&self) -> bool {
+            self.sh_flags as u32 & SHF_ALLOC == SHF_ALLOC
         }
     }
 
@@ -420,37 +487,53 @@ mod std {
         }
     }
 
-    impl<'a> ctx::TryFromCtx<'a, (usize, Ctx)> for SectionHeader {
-        type Error = scroll::Error;
-        fn try_from_ctx(bytes: &'a [u8], (offset, Ctx { container, le }): (usize, Ctx)) -> result::Result<Self, Self::Error> {
+    impl<'a> ctx::TryFromCtx<'a, Ctx> for SectionHeader {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_from_ctx(bytes: &'a [u8], Ctx {container, le}: Ctx) -> result::Result<(Self, Self::Size), Self::Error> {
             use scroll::Pread;
-            let shdr = match container {
+            let res = match container {
                 Container::Little => {
-                    bytes.pread_with::<section_header32::SectionHeader>(offset, le)?.into()
+                    (bytes.pread_with::<section_header32::SectionHeader>(0, le)?.into(), section_header32::SIZEOF_SHDR)
                 },
                 Container::Big => {
-                    bytes.pread_with::<section_header64::SectionHeader>(offset, le)?.into()
+                    (bytes.pread_with::<section_header64::SectionHeader>(0, le)?.into(), section_header64::SIZEOF_SHDR)
                 }
             };
-            Ok(shdr)
+            Ok(res)
         }
     }
 
-    impl ctx::TryIntoCtx<(usize, Ctx)> for SectionHeader {
-        type Error = scroll::Error;
-        fn try_into_ctx(self, mut bytes: &mut [u8], (offset, Ctx { container, le }): (usize, Ctx)) -> result::Result<(), Self::Error> {
+    impl ctx::TryIntoCtx<Ctx> for SectionHeader {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) -> result::Result<Self::Size, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {
                     let shdr: section_header32::SectionHeader = self.into();
-                    bytes.pwrite_with(shdr, offset, le)?;
+                    Ok(bytes.pwrite_with(shdr, 0, le)?)
                 },
                 Container::Big => {
                     let shdr: section_header64::SectionHeader = self.into();
-                    bytes.pwrite_with(shdr, offset, le)?;
+                    Ok(bytes.pwrite_with(shdr, 0, le)?)
                 }
             }
-            Ok(())
         }
     }
-}
+    impl ctx::IntoCtx<Ctx> for SectionHeader {
+        fn into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) {
+            use scroll::Pwrite;
+            match container {
+                Container::Little => {
+                    let shdr: section_header32::SectionHeader = self.into();
+                    bytes.pwrite_with(shdr, 0, le).unwrap();
+                },
+                Container::Big => {
+                    let shdr: section_header64::SectionHeader = self.into();
+                    bytes.pwrite_with(shdr, 0, le).unwrap();
+                }
+            }
+        }
+    }
+} // end if_std

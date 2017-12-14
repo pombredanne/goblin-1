@@ -75,18 +75,13 @@ pub fn pt_to_str(pt: u32) -> &'static str {
     }
 }
 
-#[cfg(feature = "std")]
-pub use self::std::*;
-
-#[cfg(feature = "std")]
-mod std {
-    use super::*;
+if_std! {
     use core::fmt;
-    use scroll::{self, ctx};
+    use scroll::ctx;
     use core::result;
+    use core::ops::Range;
     use container::{Ctx, Container};
 
-    #[cfg(feature = "std")]
     #[derive(Default, PartialEq, Clone)]
     /// A unified ProgramHeader - convertable to and from 32-bit and 64-bit variants
     pub struct ProgramHeader {
@@ -105,7 +100,7 @@ mod std {
         #[inline]
         pub fn size(ctx: &Ctx) -> usize {
             use scroll::ctx::SizeWith;
-            Self::size_with(&ctx)
+            Self::size_with(ctx)
         }
         /// Create a new `PT_LOAD` ELF program header
         pub fn new() -> Self {
@@ -121,22 +116,41 @@ mod std {
                 p_align : 2 << 20,
             }
         }
+        /// Returns this program header's file offset range
+        pub fn file_range(&self) -> Range<usize> {
+            (self.p_offset as usize..self.p_offset as usize + self.p_filesz as usize)
+        }
+        /// Returns this program header's virtual memory range
+        pub fn vm_range(&self) -> Range<usize> {
+            (self.p_vaddr as usize..self.p_vaddr as usize + self.p_memsz as usize)
+        }
         /// Sets the executable flag
         pub fn executable(&mut self) {
-            self.p_flags = self.p_flags | PF_X;
+            self.p_flags |= PF_X;
         }
         /// Sets the write flag
         pub fn write(&mut self) {
-            self.p_flags = self.p_flags | PF_W;
+            self.p_flags |= PF_W;
         }
         /// Sets the read flag
         pub fn read(&mut self) {
-            self.p_flags = self.p_flags | PF_R;
+            self.p_flags |= PF_R;
         }
-
+        /// Whether this program header is executable
+        pub fn is_executable(&self) -> bool {
+            self.p_flags & PF_X != 0
+        }
+        /// Whether this program header is readable
+        pub fn is_read(&self) -> bool {
+            self.p_flags & PF_R != 0
+        }
+        /// Whether this program header is writable
+        pub fn is_write(&self) -> bool {
+            self.p_flags & PF_W != 0
+        }
         #[cfg(feature = "endian_fd")]
         pub fn parse(bytes: &[u8], mut offset: usize, count: usize, ctx: Ctx) -> ::error::Result<Vec<ProgramHeader>> {
-            use scroll::Gread;
+            use scroll::Pread;
             let mut program_headers = Vec::with_capacity(count);
             for _ in 0..count {
                 let phdr = bytes.gread_with(&mut offset, ctx)?;
@@ -176,40 +190,41 @@ mod std {
         }
     }
 
-    impl<'a> ctx::TryFromCtx<'a, (usize, Ctx)> for ProgramHeader {
-        type Error = scroll::Error;
-        fn try_from_ctx(bytes: &'a [u8], (offset, Ctx { container, le}): (usize, Ctx)) -> result::Result<Self, Self::Error> {
+    impl<'a> ctx::TryFromCtx<'a, Ctx> for ProgramHeader {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_from_ctx(bytes: &'a [u8], Ctx { container, le}: Ctx) -> result::Result<(Self, Self::Size), Self::Error> {
             use scroll::Pread;
-            let phdr = match container {
+            let res = match container {
                 Container::Little => {
-                    bytes.pread_with::<program_header32::ProgramHeader>(offset, le)?.into()
+                    (bytes.pread_with::<program_header32::ProgramHeader>(0, le)?.into(), program_header32::SIZEOF_PHDR)
                 },
                 Container::Big => {
-                    bytes.pread_with::<program_header64::ProgramHeader>(offset, le)?.into()
+                    (bytes.pread_with::<program_header64::ProgramHeader>(0, le)?.into(), program_header64::SIZEOF_PHDR)
                 }
             };
-            Ok(phdr)
+            Ok(res)
         }
     }
 
-    impl ctx::TryIntoCtx<(usize, Ctx)> for ProgramHeader {
-        type Error = scroll::Error;
-        fn try_into_ctx(self, mut bytes: &mut [u8], (offset, Ctx {container, le}): (usize, Ctx)) -> result::Result<(), Self::Error> {
+    impl ctx::TryIntoCtx<Ctx> for ProgramHeader {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) -> result::Result<Self::Size, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {
                     let phdr: program_header32::ProgramHeader = self.into();
-                    bytes.pwrite_with(phdr, offset, le)?;
+                    Ok(bytes.pwrite_with(phdr, 0, le)?)
                 },
                 Container::Big => {
                     let phdr: program_header64::ProgramHeader = self.into();
-                    bytes.pwrite_with(phdr, offset, le)?;
+                    Ok(bytes.pwrite_with(phdr, 0, le)?)
                 }
             }
-            Ok(())
         }
     }
-}
+} // end if_std
 
 macro_rules! elf_program_header_std_impl { ($size:ty) => {
 
@@ -222,15 +237,10 @@ macro_rules! elf_program_header_std_impl { ($size:ty) => {
         }
     }
 
-    #[cfg(feature = "std")]
-    pub use self::std::*;
-
-    #[cfg(feature = "std")]
-    mod std {
+    if_std! {
 
         use elf::program_header::ProgramHeader as ElfProgramHeader;
-        use super::*;
-        use elf::error::*;
+        use error::Result;
 
         use core::slice;
         use core::fmt;
@@ -239,7 +249,7 @@ macro_rules! elf_program_header_std_impl { ($size:ty) => {
         use std::io::{Seek, Read};
         use std::io::SeekFrom::Start;
 
-        use plain::Methods;
+        use plain::Plain;
 
         impl From<ProgramHeader> for ElfProgramHeader {
             fn from(ph: ProgramHeader) -> Self {
@@ -290,17 +300,16 @@ macro_rules! elf_program_header_std_impl { ($size:ty) => {
         impl ProgramHeader {
             #[cfg(feature = "endian_fd")]
             pub fn parse(bytes: &[u8], mut offset: usize, count: usize, ctx: ::scroll::Endian) -> Result<Vec<ProgramHeader>> {
-                use scroll::Gread;
+                use scroll::Pread;
                 let mut program_headers = vec![ProgramHeader::default(); count];
-                let mut offset = &mut offset;
+                let offset = &mut offset;
                 bytes.gread_inout_with(offset, &mut program_headers, ctx)?;
                 Ok(program_headers)
             }
 
             pub fn from_bytes(bytes: &[u8], phnum: usize) -> Vec<ProgramHeader> {
-                // FIXME: will panic if length of `bytes` is not equal to phnum * SIZEOF_PHDR.
                 let mut phdrs = vec![ProgramHeader::default(); phnum];
-                phdrs.as_mut_bytes().copy_from_slice(bytes);
+                phdrs.copy_from_bytes(bytes).expect("buffer is too short for given number of entries");
                 phdrs
             }
 
@@ -313,11 +322,13 @@ macro_rules! elf_program_header_std_impl { ($size:ty) => {
             pub fn from_fd(fd: &mut File, offset: u64, count: usize) -> Result<Vec<ProgramHeader>> {
                 let mut phdrs = vec![ProgramHeader::default(); count];
                 try!(fd.seek(Start(offset)));
-                try!(fd.read(phdrs.as_mut_bytes()));
+                unsafe {
+                    try!(fd.read(plain::as_mut_bytes(&mut *phdrs)));
+                }
                 Ok(phdrs)
             }
         }
-    }
+    } // end if_std
 };}
 
 

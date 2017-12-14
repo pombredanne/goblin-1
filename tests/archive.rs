@@ -1,7 +1,6 @@
 extern crate scroll;
 extern crate goblin;
 use goblin::archive::*;
-use goblin::elf;
 use scroll::Pread;
 use std::path::Path;
 use std::fs::File;
@@ -17,7 +16,7 @@ fn parse_file_header() {
                                             0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x38,
                                             0x32, 0x34, 0x34, 0x20, 0x20, 0x20, 0x20,
                                             0x20, 0x20, 0x60, 0x0a];
-    let buffer = scroll::Buffer::new(&file_header[..]);
+    let buffer = &file_header[..];
     match buffer.pread::<MemberHeader>(0) {
         Err(_) => assert!(false),
         Ok(file_header2) => {
@@ -38,8 +37,7 @@ fn parse_file_header() {
 fn parse_archive() {
     let crt1a: Vec<u8> = include!("../etc/crt1a.rs");
     const START: &'static str = "_start";
-    let buffer = scroll::Buffer::new(crt1a);
-    match Archive::parse(&buffer) {
+    match Archive::parse(&crt1a) {
         Ok(archive) => {
             assert_eq!(archive.member_of_symbol(START), Some("crt1.o"));
             if let Some(member) = archive.get("crt1.o") {
@@ -55,45 +53,54 @@ fn parse_archive() {
 }
 
 #[test]
-fn parse_self_wow_so_meta_doge() {
-    let path = Path::new("target").join("debug").join("libgoblin.rlib");
-    match File::open(path) {
-        Ok(fd) => {
-            let buffer = scroll::Buffer::try_from(fd).unwrap();
-            match Archive::parse(&buffer) {
-                Ok(archive) => {
-                    let mut found = false;
-                    for member in archive.members() {
-                        if member.starts_with("goblin") && member.ends_with("0.o") {
-                            assert_eq!(archive.member_of_symbol("wow_so_meta_doge_symbol"), Some(member.as_str()));
-                            match archive.extract(member.as_str(), &buffer) {
-                                Ok(bytes) => {
-                                    match elf::Elf::parse(&bytes) {
-                                        Ok(elf) => {
-                                            assert!(elf.entry == 0);
-                                            assert!(elf.bias == 0);
-                                            found = true;
-                                            break;
-                                        },
-                                        Err(err) => {
-                                            println!("{:?}", err);
-                                            #[cfg(target_os="linux")]
-                                            assert!(false)
-                                        }
-                                    }
-                                },
-                                Err(_) => assert!(false)
-                            }
-                        }
-                    }
-                    if !found {
-                        println!("goblin-<hash>.0.o not found");
-                        assert!(false)
-                    }
-                },
-                Err(err) => {println!("{:?}", err); assert!(false)}
-            }
-        },
-        Err(err) => {println!("{:?}", err); assert!(false)}
+fn parse_self() {
+    use std::fs;
+    use std::io::Read;
+    let mut path = Path::new("target").join("debug").join("libgoblin.rlib");
+    // https://github.com/m4b/goblin/issues/63
+    if !fs::metadata(&path).is_ok() {
+        path = Path::new("target").join("release").join("libgoblin.rlib");
+    }
+    let buffer = {
+        let mut fd = File::open(path).expect("open file");
+        let mut v = Vec::new();
+        fd.read_to_end(&mut v).expect("read file");
+        v
+    };
+
+    let archive = Archive::parse(&buffer).expect("parse rlib");
+
+    // check that the archive has a useful symbol table by counting the total number of symbols
+    let symbol_count = archive.summarize().into_iter()
+        .map(|(_member_name, _member_index, ref symbols)| symbols.len())
+        .fold(0, |sum,symbol_count| sum + symbol_count);
+    assert!(symbol_count > 500);
+
+    let goblin_object_name = archive.members()
+        .into_iter()
+        .filter(|member| {
+            println!("member: {:?}", member);
+            member.ends_with("goblin-archive.o")    // < 1.18
+                || (member.starts_with("goblin") && member.ends_with("0.o")) // >= 1.18 && < 1.22
+                || (member.starts_with("goblin") && member.ends_with("rust-cgu.o")) // = 1.22
+                || (member.starts_with("goblin") && member.ends_with("rcgu.o")) // >= nightly 1.23
+        })
+        .next()
+        .expect("goblin-<hash>.0.o not found");
+
+    let bytes = archive.extract(goblin_object_name, &buffer).expect("extract goblin object");
+    match goblin::Object::parse(&bytes).expect("parse object") {
+        goblin::Object::Elf(elf) => {
+            assert!(elf.entry == 0);
+            assert!(elf.bias == 0);
+        }
+        goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
+            assert_eq!(macho.header.filetype, goblin::mach::header::MH_OBJECT);
+            assert_eq!(macho.entry, 0);
+        }
+        other => {
+            println!("unexpected Object::parse result: {:?}", other);
+            assert!(false);
+        }
     }
 }

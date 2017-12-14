@@ -271,17 +271,12 @@ pub const DF_1_GLOBAUDIT: u64 = 0x01000000;
 /// Singleton dyn are used.
 pub const DF_1_SINGLETON: u64 = 0x02000000;
 
-#[cfg(feature = "std")]
-pub use self::std::*;
-
-#[cfg(feature = "std")]
-mod std {
-    use super::*;
+if_std! {
     use core::fmt;
-    use scroll::{self, ctx};
+    use scroll::ctx;
     use core::result;
     use container::{Ctx, Container};
-    use elf::strtab::Strtab;
+    use strtab::Strtab;
     use self::dyn32::{DynamicInfo};
 
     #[derive(Default, PartialEq, Clone)]
@@ -321,37 +316,38 @@ mod std {
         }
     }
 
-    impl<'a> ctx::TryFromCtx<'a, (usize, Ctx)> for Dyn {
-        type Error = scroll::Error;
-        fn try_from_ctx(bytes: &'a [u8], (offset, Ctx { container, le}): (usize, Ctx)) -> result::Result<Self, Self::Error> {
+    impl<'a> ctx::TryFromCtx<'a, Ctx> for Dyn {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_from_ctx(bytes: &'a [u8], Ctx { container, le}: Ctx) -> result::Result<(Self, Self::Size), Self::Error> {
             use scroll::Pread;
             let dyn = match container {
                 Container::Little => {
-                    bytes.pread_with::<dyn32::Dyn>(offset, le)?.into()
+                    (bytes.pread_with::<dyn32::Dyn>(0, le)?.into(), dyn32::SIZEOF_DYN)
                 },
                 Container::Big => {
-                    bytes.pread_with::<dyn64::Dyn>(offset, le)?.into()
+                    (bytes.pread_with::<dyn64::Dyn>(0, le)?.into(), dyn64::SIZEOF_DYN)
                 }
             };
             Ok(dyn)
         }
     }
 
-    impl ctx::TryIntoCtx<(usize, Ctx)> for Dyn {
-        type Error = scroll::Error;
-        fn try_into_ctx(self, mut bytes: &mut [u8], (offset, Ctx { container, le}): (usize, Ctx)) -> result::Result<(), Self::Error> {
+    impl ctx::TryIntoCtx<Ctx> for Dyn {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_into_ctx(self, bytes: &mut [u8], Ctx { container, le}: Ctx) -> result::Result<Self::Size, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {
                     let dyn: dyn32::Dyn = self.into();
-                    bytes.pwrite_with(dyn, offset, le)?;
+                    Ok(bytes.pwrite_with(dyn, 0, le)?)
                 },
                 Container::Big => {
                     let dyn: dyn64::Dyn = self.into();
-                    bytes.pwrite_with(dyn, offset, le)?;
+                    Ok(bytes.pwrite_with(dyn, 0, le)?)
                 }
             }
-            Ok(())
         }
     }
 
@@ -367,7 +363,7 @@ mod std {
         /// Returns a vector of dynamic entries from the underlying byte `bytes`, with `endianness`, using the provided `phdrs`
         pub fn parse(bytes: &[u8], phdrs: &[::elf::program_header::ProgramHeader], bias: usize, ctx: Ctx) -> ::error::Result<Option<Self>> {
             use scroll::ctx::SizeWith;
-            use scroll::Gread;
+            use scroll::Pread;
             use elf::program_header;
             for phdr in phdrs {
                 if phdr.p_type == program_header::PT_DYNAMIC {
@@ -394,13 +390,16 @@ mod std {
             Ok(None)
         }
 
-        pub fn get_libraries<'a>(&self, strtab: &Strtab<'a>) -> Vec<String> {
+        pub fn get_libraries<'a>(&self, strtab: &Strtab<'a>) -> Vec<&'a str> {
             let count = self.info.needed_count;
             let mut needed = Vec::with_capacity(count);
             for dyn in &self.dyns {
                 if dyn.d_tag as u64 == DT_NEEDED {
-                    let lib = &strtab[dyn.d_val as usize];
-                    needed.push(lib.to_owned());
+                    match strtab.get(dyn.d_val as usize) {
+                        Some(Ok(lib)) => needed.push(lib),
+                        // FIXME: warn! here
+                        _ => (),
+                    }
                 }
             }
             needed
@@ -420,12 +419,7 @@ macro_rules! elf_dyn_std_impl {
             }
         }
 
-        #[cfg(feature = "std")]
-        pub use self::std::*;
-
-        #[cfg(feature = "std")]
-        mod std {
-
+        if_std! {
             use core::fmt;
             use core::slice;
 
@@ -433,13 +427,10 @@ macro_rules! elf_dyn_std_impl {
             use std::io::{Read, Seek};
             use std::io::SeekFrom::Start;
             use elf::program_header::{PT_DYNAMIC};
-            use elf::strtab::Strtab;
-            use elf::error::*;
+            use strtab::Strtab;
+            use error::Result;
 
             use elf::dyn::Dyn as ElfDyn;
-            use super::*;
-
-            use plain::Methods;
 
             impl From<ElfDyn> for Dyn {
                 fn from(dyn: ElfDyn) -> Self {
@@ -505,7 +496,9 @@ macro_rules! elf_dyn_std_impl {
                         let dync = filesz / SIZEOF_DYN;
                         let mut dyns = vec![Dyn::default(); dync];
                         try!(fd.seek(Start(phdr.p_offset as u64)));
-                        try!(fd.read(dyns.as_mut_bytes()));
+                        unsafe {
+                            try!(fd.read(plain::as_mut_bytes(&mut *dyns)));
+                        }
                         dyns.dedup();
                         return Ok(Some(dyns));
                     }
@@ -632,7 +625,7 @@ macro_rules! elf_dyn_std_impl {
                 }
                 info
             }
-        }
+        } // end if_std
     };
 }
 

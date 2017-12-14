@@ -104,29 +104,20 @@ macro_rules! elf_reloc {
 
 macro_rules! elf_rela_std_impl { ($size:ident, $isize:ty) => {
 
-        #[cfg(feature = "std")]
-        pub use self::std::*;
-
-        #[cfg(feature = "std")]
-        mod std {
-
+    if_std! {
             use elf::reloc::Reloc;
-            use super::*;
 
             use core::slice;
-            use elf::error::*;
+            use error::Result;
 
             use std::fs::File;
             use std::io::{Read, Seek};
             use std::io::SeekFrom::Start;
 
-            use plain::Methods;
-
             impl From<Rela> for Reloc {
                 fn from(rela: Rela) -> Self {
                     Reloc {
                         r_offset: rela.r_offset as usize,
-                        r_info: rela.r_info as usize,
                         r_addend: rela.r_addend as isize,
                         r_sym: r_sym(rela.r_info) as usize,
                         r_type: r_type(rela.r_info),
@@ -139,7 +130,6 @@ macro_rules! elf_rela_std_impl { ($size:ident, $isize:ty) => {
                 fn from(rel: Rel) -> Self {
                     Reloc {
                         r_offset: rel.r_offset as usize,
-                        r_info: rel.r_info as usize,
                         r_addend: 0,
                         r_sym: r_sym(rel.r_info) as usize,
                         r_type: r_type(rel.r_info),
@@ -150,9 +140,10 @@ macro_rules! elf_rela_std_impl { ($size:ident, $isize:ty) => {
 
             impl From<Reloc> for Rela {
                 fn from(rela: Reloc) -> Self {
+                    let r_info = r_info(rela.r_sym as $size, rela.r_type as $size);
                     Rela {
                         r_offset: rela.r_offset as $size,
-                        r_info: rela.r_info as $size,
+                        r_info: r_info,
                         r_addend: rela.r_addend as $isize,
                     }
                 }
@@ -160,9 +151,10 @@ macro_rules! elf_rela_std_impl { ($size:ident, $isize:ty) => {
 
             impl From<Reloc> for Rel {
                 fn from(rel: Reloc) -> Self {
+                    let r_info = r_info(rel.r_sym as $size, rel.r_type as $size);
                     Rel {
                         r_offset: rel.r_offset as $size,
-                        r_info: rel.r_info as $size,
+                        r_info: r_info,
                     }
                 }
             }
@@ -191,10 +183,12 @@ macro_rules! elf_rela_std_impl { ($size:ident, $isize:ty) => {
                 let count = size / SIZEOF_RELA;
                 let mut relocs = vec![Rela::default(); count];
                 fd.seek(Start(offset as u64))?;
-                fd.read(relocs.as_mut_bytes())?;
+                unsafe {
+                    fd.read(plain::as_mut_bytes(&mut *relocs))?;
+                }
                 Ok(relocs)
             }
-        }
+        } // end if_std
     };
 }
 
@@ -256,15 +250,10 @@ pub mod reloc64 {
 //////////////////////////////
 // Generic Reloc
 /////////////////////////////
-#[cfg(feature = "std")]
-pub use self::std::*;
-
-#[cfg(feature = "std")]
-mod std {
-    use super::*;
+if_std! {
     use core::fmt;
     use core::result;
-    use scroll::{self, ctx};
+    use scroll::ctx;
     use container::{Ctx, Container};
 
     #[derive(Clone, Copy, PartialEq, Default)]
@@ -272,8 +261,6 @@ mod std {
     pub struct Reloc {
         /// Address
         pub r_offset: usize,
-        /// Relocation type and symbol index
-        pub r_info: usize,
         /// Addend
         pub r_addend: isize,
         /// The index into the corresponding symbol table - either dynamic or regular
@@ -291,10 +278,10 @@ mod std {
         }
         #[cfg(feature = "endian_fd")]
         pub fn parse(bytes: &[u8], mut offset: usize, filesz: usize, is_rela: bool, ctx: Ctx) -> ::error::Result<Vec<Reloc>> {
-            use scroll::Gread;
+            use scroll::Pread;
             let count = filesz / Reloc::size(is_rela, ctx);
             let mut relocs = Vec::with_capacity(count);
-            let mut offset = &mut offset;
+            let offset = &mut offset;
             for _ in 0..count {
                 let reloc = bytes.gread_with::<Reloc>(offset, (is_rela, ctx))?;
                 relocs.push(reloc);
@@ -319,23 +306,24 @@ mod std {
         }
     }
 
-    impl<'a> ctx::TryFromCtx<'a, (usize, RelocCtx)> for Reloc {
-        type Error = scroll::Error;
-        fn try_from_ctx(bytes: &'a [u8], (offset, (is_rela, Ctx { container, le })): (usize, RelocCtx)) -> result::Result<Self, Self::Error> {
+    impl<'a> ctx::TryFromCtx<'a, RelocCtx> for Reloc {
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_from_ctx(bytes: &'a [u8], (is_rela, Ctx { container, le }): RelocCtx) -> result::Result<(Self, Self::Size), Self::Error> {
             use scroll::Pread;
             let reloc = match container {
                 Container::Little => {
                     if is_rela {
-                        bytes.pread_with::<reloc32::Rela>(offset, le)?.into()
+                        (bytes.pread_with::<reloc32::Rela>(0, le)?.into(), reloc32::SIZEOF_RELA)
                     } else {
-                        bytes.pread_with::<reloc32::Rel>(offset, le)?.into()
+                        (bytes.pread_with::<reloc32::Rel>(0, le)?.into(), reloc32::SIZEOF_REL)
                     }
                 },
                 Container::Big => {
                     if is_rela {
-                        bytes.pread_with::<reloc64::Rela>(offset, le)?.into()
+                        (bytes.pread_with::<reloc64::Rela>(0, le)?.into(), reloc64::SIZEOF_RELA)
                     } else {
-                        bytes.pread_with::<reloc64::Rel>(offset, le)?.into()
+                        (bytes.pread_with::<reloc64::Rel>(0, le)?.into(), reloc64::SIZEOF_REL)
                     }
                 }
             };
@@ -343,22 +331,41 @@ mod std {
         }
     }
 
-    impl ctx::TryIntoCtx<(usize, Ctx)> for Reloc {
-        type Error = scroll::Error;
-        /// Writes the relocation into `bytes`; forces `Rel` relocation records for 32-bit containers, and `Rela` for 64-bit containers
-        fn try_into_ctx(self, mut bytes: &mut [u8], (offset, Ctx { container, le }): (usize, Ctx)) -> result::Result<(), Self::Error> {
+    impl ctx::TryIntoCtx<RelocCtx> for Reloc {
+        type Error = ::error::Error;
+        type Size = usize;
+        // TODO: I think this is a bad idea
+        /// Writes the relocation into `bytes`
+        fn try_into_ctx(self, bytes: &mut [u8], (is_rela, Ctx {container, le}): RelocCtx) -> result::Result<Self::Size, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {
-                    let rel: reloc32::Rel = self.into();
-                    bytes.pwrite_with(rel, offset, le)?;
+                    if is_rela {
+                        let rela: reloc32::Rela = self.into();
+                        Ok(bytes.pwrite_with(rela, 0, le)?)
+                    } else {
+                        let rel: reloc32::Rel = self.into();
+                        Ok(bytes.pwrite_with(rel, 0, le)?)
+                    }
                 },
                 Container::Big => {
-                    let rela: reloc64::Rela = self.into();
-                    bytes.pwrite_with(rela, offset, le)?;
+                    if is_rela {
+                        let rela: reloc64::Rela = self.into();
+                        Ok(bytes.pwrite_with(rela, 0, le)?)
+                    } else {
+                        let rel: reloc64::Rel = self.into();
+                        Ok(bytes.pwrite_with(rel, 0, le)?)
+                    }
                 },
-            };
-            Ok(())
+            }
+        }
+    }
+
+    impl ctx::IntoCtx<(bool, Ctx)> for Reloc {
+        /// Writes the relocation into `bytes`
+        fn into_ctx(self, bytes: &mut [u8], ctx: RelocCtx) {
+            use scroll::Pwrite;
+            bytes.pwrite_with(self, 0, ctx).unwrap();
         }
     }
 
@@ -374,4 +381,4 @@ mod std {
             )
         }
     }
-}
+} // end if_std

@@ -1,10 +1,11 @@
 //! A header contains minimal architecture information, the binary kind, the number of load commands, as well as an endianness hint
 
-use std::mem;
 use std::fmt;
-use scroll::{self, ctx};
+use scroll::{self, ctx, Pwrite, Endian};
+use scroll::ctx::SizeWith;
+use plain::{self, Plain};
 
-use mach::constants::cputype::cpu_type_to_str;
+use mach::constants::cputype::{CpuType, CpuSubType, CPU_SUBTYPE_MASK};
 use error;
 use container::{self, Container};
 
@@ -156,7 +157,7 @@ pub fn filetype_to_str(filetype: u32) -> &'static str {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 #[derive(Pread, Pwrite, SizeWith)]
 /// A 32-bit Mach-o header
 pub struct Header32 {
@@ -164,11 +165,8 @@ pub struct Header32 {
     pub magic: u32,
     /// cpu specifier
     pub cputype: u32,
-    pub padding1: u8,
-    pub padding2: u8,
-    pub caps: u8,
     /// machine specifier
-    pub cpusubtype: u8,
+    pub cpusubtype: u32,
     /// type of file
     pub filetype: u32,
     /// number of load commands
@@ -181,39 +179,29 @@ pub struct Header32 {
 
 pub const SIZEOF_HEADER_32: usize = 0x1c;
 
-impl fmt::Debug for Header32 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,
-               "0x{:x} {} {} 0x{:x} {} {} {} 0x{:x}",
-               self.magic,
-               cpu_type_to_str(self.cputype),
-               self.cpusubtype,
-               self.caps,
-               filetype_to_str(self.filetype),
-               self.ncmds,
-               self.sizeofcmds,
-               self.flags,
-        )
-    }
-}
+unsafe impl Plain for Header32 {}
 
 impl Header32 {
+    /// Transmutes the given byte array into the corresponding 32-bit Mach-o header
+    pub fn from_bytes(bytes: &[u8; SIZEOF_HEADER_32]) -> &Self {
+        plain::from_bytes(bytes).unwrap()
+    }
     pub fn size(&self) -> usize {
         SIZEOF_HEADER_32
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 #[derive(Pread, Pwrite, SizeWith)]
 /// A 64-bit Mach-o header
 pub struct Header64 {
+    /// mach magic number identifier
     pub magic: u32,
+    /// cpu specifier
     pub cputype: u32,
-    pub cpusubtype: u8,
-    pub padding1: u8,
-    pub padding2: u8,
-    pub caps: u8,
+    /// machine specifier
+    pub cpusubtype: u32,
     /// type of file
     pub filetype: u32,
     /// number of load commands
@@ -225,29 +213,14 @@ pub struct Header64 {
     pub reserved: u32,
 }
 
+unsafe impl Plain for Header64 {}
+
 pub const SIZEOF_HEADER_64: usize = 32;
 
-impl fmt::Debug for Header64 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,
-               "0x{:x} {} {} 0x{:x} {} {} {} 0x{:x} 0x{:x}",
-               self.magic,
-               cpu_type_to_str(self.cputype),
-               self.cpusubtype,
-               self.caps,
-               filetype_to_str(self.filetype),
-               self.ncmds,
-               self.sizeofcmds,
-               self.flags,
-               self.reserved)
-    }
-}
-
 impl Header64 {
-    /// Returns the corresponding Mach-o header from the given byte array
+    /// Transmutes the given byte array into the corresponding 64-bit Mach-o header
     pub fn from_bytes(bytes: &[u8; SIZEOF_HEADER_64]) -> &Self {
-        let header: &Header64 = unsafe { mem::transmute(bytes) };
-        header
+        plain::from_bytes(bytes).unwrap()
     }
     pub fn size(&self) -> usize {
         SIZEOF_HEADER_64
@@ -260,10 +233,7 @@ impl Header64 {
 pub struct Header {
     pub magic: u32,
     pub cputype: u32,
-    pub cpusubtype: u8,
-    pub padding1: u8,
-    pub padding2: u8,
-    pub caps: u8,
+    pub cpusubtype: u32,
     /// type of file
     pub filetype: u32,
     /// number of load commands
@@ -278,11 +248,10 @@ pub struct Header {
 impl fmt::Debug for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f,
-               "0x{:x} {} {} 0x{:x} {} {} {} 0x{:x} 0x{:x}",
+               "0x{:x} {} 0x{:x} {} {} {} 0x{:x} 0x{:x}",
                self.magic,
-               cpu_type_to_str(self.cputype),
-               self.cpusubtype,
-               self.caps,
+               self.cputype(),
+               self.cpusubtype(),
                filetype_to_str(self.filetype),
                self.ncmds,
                self.sizeofcmds,
@@ -297,14 +266,25 @@ impl From<Header32> for Header {
             magic:      header.magic,
             cputype:    header.cputype,
             cpusubtype: header.cpusubtype,
-            padding1:   header.padding1,
-            padding2:   header.padding2,
-            caps:       header.caps,
             filetype:   header.filetype,
             ncmds:      header.ncmds as usize,
             sizeofcmds: header.sizeofcmds,
             flags:      header.flags,
             reserved:   0,
+        }
+    }
+}
+
+impl From<Header> for Header32 {
+    fn from (header: Header) -> Self {
+        Header32 {
+            magic:      header.magic,
+            cputype:    header.cputype,
+            cpusubtype: header.cpusubtype,
+            filetype:   header.filetype,
+            ncmds:      header.ncmds as u32,
+            sizeofcmds: header.sizeofcmds,
+            flags:      header.flags,
         }
     }
 }
@@ -315,9 +295,6 @@ impl From<Header64> for Header {
             magic:      header.magic,
             cputype:    header.cputype,
             cpusubtype: header.cpusubtype,
-            padding1:   header.padding1,
-            padding2:   header.padding2,
-            caps:       header.caps,
             filetype:   header.filetype,
             ncmds:      header.ncmds as usize,
             sizeofcmds: header.sizeofcmds,
@@ -327,7 +304,27 @@ impl From<Header64> for Header {
     }
 }
 
+impl From<Header> for Header64 {
+    fn from (header: Header) -> Self {
+        Header64 {
+            magic:      header.magic,
+            cputype:    header.cputype,
+            cpusubtype: header.cpusubtype,
+            filetype:   header.filetype,
+            ncmds:      header.ncmds as u32,
+            sizeofcmds: header.sizeofcmds,
+            flags:      header.flags,
+            reserved:   header.reserved,
+        }
+    }
+}
+
 impl Header {
+    pub fn new(ctx: &container::Ctx) -> Self {
+        let mut header = Header::default();
+        header.magic = if ctx.is_big () { MH_MAGIC_64 } else { MH_MAGIC };
+        header
+    }
     #[inline]
     pub fn is_little_endian(&self) -> bool {
         #[cfg(target_endian="big")]
@@ -344,6 +341,18 @@ impl Header {
         use scroll::ctx::SizeWith;
         Self::size_with(&self.container())
     }
+    /// Returns the cpu type
+    pub fn cputype(&self) -> CpuType {
+        self.cputype
+    }
+    /// Returns the cpu subtype with the capabilities removed
+    pub fn cpusubtype(&self) -> CpuSubType {
+        self.cpusubtype & !CPU_SUBTYPE_MASK
+    }
+    /// Returns the capabilities of the CPU
+    pub fn cpu_caps(&self) -> u32 {
+        (self.cpusubtype & CPU_SUBTYPE_MASK) >> 24
+    }
     pub fn ctx(&self) -> error::Result<container::Ctx> {
         // todo check magic is not junk, and error otherwise
         let is_lsb = self.is_little_endian();
@@ -351,6 +360,20 @@ impl Header {
         // todo check magic is 32 and not junk, and error otherwise
         let container = self.container();
         Ok(container::Ctx::new(container, endianness))
+    }
+}
+
+impl ctx::SizeWith<container::Ctx> for Header {
+    type Units = usize;
+    fn size_with(container: &container::Ctx) -> usize {
+        match container.container {
+            Container::Little => {
+                SIZEOF_HEADER_32
+            },
+            Container::Big => {
+                SIZEOF_HEADER_64
+            },
+        }
     }
 }
 
@@ -368,9 +391,10 @@ impl ctx::SizeWith<Container> for Header {
     }
 }
 
-impl<'a> ctx::TryFromCtx<'a, (usize, ctx::DefaultCtx)> for Header {
-    type Error = error::Error;
-    fn try_from_ctx(bytes: &'a [u8], (offset, _): (usize, ctx::DefaultCtx)) -> error::Result<Self> {
+impl<'a> ctx::TryFromCtx<'a, Endian> for Header {
+    type Error = ::error::Error;
+    type Size = usize;
+    fn try_from_ctx(bytes: &'a [u8], _: Endian) -> error::Result<(Self, Self::Size)> {
         use mach;
         use scroll::{Pread};
         let size = bytes.len();
@@ -378,7 +402,7 @@ impl<'a> ctx::TryFromCtx<'a, (usize, ctx::DefaultCtx)> for Header {
             let error = error::Error::Malformed(format!("bytes size is smaller than an Mach-o header"));
             Err(error)
         } else {
-            let magic = mach::peek(&bytes, offset)?;
+            let magic = mach::peek(&bytes, 0)?;
             match magic {
                 MH_CIGAM_64 | MH_CIGAM | MH_MAGIC_64 | MH_MAGIC => {
                     let is_lsb = magic == MH_CIGAM || magic == MH_CIGAM_64;
@@ -387,10 +411,10 @@ impl<'a> ctx::TryFromCtx<'a, (usize, ctx::DefaultCtx)> for Header {
                     let container = if magic == MH_MAGIC_64 || magic == MH_CIGAM_64 { Container::Big } else { Container::Little };
                     match container {
                         Container::Little => {
-                            Ok(Header::from(bytes.pread_with::<Header32>(offset, le)?))
+                            Ok((Header::from(bytes.pread_with::<Header32>(0, le)?), SIZEOF_HEADER_32))
                         },
                         Container::Big => {
-                            Ok(Header::from(bytes.pread_with::<Header64>(offset, le)?))
+                            Ok((Header::from(bytes.pread_with::<Header64>(0, le)?), SIZEOF_HEADER_64))
                         },
                     }
                 },
@@ -400,5 +424,42 @@ impl<'a> ctx::TryFromCtx<'a, (usize, ctx::DefaultCtx)> for Header {
                 }
             }
         }
+    }
+}
+
+impl ctx::TryIntoCtx<container::Ctx> for Header {
+    type Error = ::error::Error;
+    type Size = usize;
+    fn try_into_ctx(self, bytes: &mut [u8], ctx: container::Ctx) -> error::Result<Self::Size> {
+        match ctx.container {
+            Container::Little => {
+                bytes.pwrite_with(Header32::from(self), 0, ctx.le)?;
+            },
+            Container::Big => {
+                bytes.pwrite_with(Header64::from(self), 0, ctx.le)?;
+            }
+        };
+        Ok(Header::size_with(&ctx))
+    }
+}
+
+impl ctx::IntoCtx<container::Ctx> for Header {
+    fn into_ctx(self, bytes: &mut [u8], ctx: container::Ctx) {
+        bytes.pwrite_with(self, 0, ctx).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_basic_header32() {
+        use mach::constants::cputype::CPU_TYPE_ARM;
+        const CPU_SUBTYPE_ARM_V7: u32 = 9;
+        use super::Header;
+        use scroll::Pread;
+        let bytes = b"\xce\xfa\xed\xfe\x0c\x00\x00\x00\t\x00\x00\x00\n\x00\x00\x00\x06\x00\x00\x00\x8c\r\x00\x00\x00\x00\x00\x00\x1b\x00\x00\x00\x18\x00\x00\x00\xe0\xf7B\xbb\x1c\xf50w\xa6\xf7u\xa3\xba(";
+        let header: Header = bytes.pread(0).unwrap();
+        assert_eq!(header.cputype, CPU_TYPE_ARM);
+        assert_eq!(header.cpusubtype, CPU_SUBTYPE_ARM_V7);
     }
 }

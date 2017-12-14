@@ -1,11 +1,8 @@
 //! Load commands tell the kernel and dynamic linker anything from how to load this binary into memory, what the entry point is, apple specific information, to which libraries it requires for dynamic linking
 
 use error;
-use container;
 use std::fmt::{self, Display};
-use core::ops::{Deref, DerefMut};
-use scroll::{self, ctx, Endian, Pread, Gread};
-use scroll::ctx::{FromCtx, SizeWith};
+use scroll::{self, ctx, Endian, Pread};
 
 ///////////////////////////////////////
 // Load Commands from mach-o/loader.h
@@ -33,7 +30,7 @@ pub type LcStr = u32;
 pub const SIZEOF_LC_STR: usize = 4;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct Section32 {
     /// name of this section
     pub sectname:  [u8; 16],
@@ -63,7 +60,7 @@ pub const SIZEOF_SECTION_32: usize = 68;
 
 /// for 64-bit architectures
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct Section64 {
     /// name of this section
     pub sectname:  [u8; 16],
@@ -94,7 +91,7 @@ pub struct Section64 {
 pub const SIZEOF_SECTION_64: usize = 80;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SegmentCommand32 {
     pub cmd:      u32,
     pub cmdsize:  u32,
@@ -118,7 +115,7 @@ impl SegmentCommand32 {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SegmentCommand64 {
     pub cmd:      u32,
     pub cmdsize:  u32,
@@ -145,7 +142,7 @@ impl SegmentCommand64 {
 /// minor version number.  The address of where the headers are loaded is in
 /// header_addr. (THIS IS OBSOLETE and no longer supported).
 #[repr(packed)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct Fvmlib {
     /// library's target pathname
     pub name: u32,
@@ -163,7 +160,7 @@ pub const SIZEOF_FVMLIB: usize = 12;
 /// fvmlib_command (cmd == LC_LOADFVMLIB) for each library it uses.
 /// (THIS IS OBSOLETE and no longer supported).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct FvmlibCommand {
     /// LC_IDFVMLIB or LC_LOADFVMLIB
     pub cmd: u32,
@@ -195,7 +192,7 @@ pub const SIZEOF_FVMLIB_COMMAND: usize = 20;
 /// dylib_command (cmd == LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, or
 /// LC_REEXPORT_DYLIB) for each library it uses.
 #[repr(packed)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct Dylib {
     /// library's path name
     pub name: LcStr,
@@ -210,7 +207,7 @@ pub struct Dylib {
 pub const SIZEOF_DYLIB: usize = 16;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DylibCommand {
     /// LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB
     pub cmd: u32,
@@ -231,7 +228,7 @@ pub const SIZEOF_DYLIB_COMMAND: usize = 20;
 /// The name of the umbrella framework for subframeworks is recorded in the
 /// following structure.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SubFrameworkCommand {
     /// LC_SUB_FRAMEWORK
     pub cmd:     u32,
@@ -251,7 +248,7 @@ pub const SIZEOF_SUB_FRAMEWORK_COMMAND: usize = 12;
 /// usually a framework name.  It can also be a name used for bundles clients
 /// where the bundle is built with "-client_name client_name".
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SubClientCommand {
     /// LC_SUB_CLIENT
     pub cmd:     u32,
@@ -275,7 +272,7 @@ pub const SIZEOF_SUB_CLIENT_COMMAND: usize = 12;
 /// Zero or more sub_umbrella frameworks may be use by an umbrella framework.
 /// The name of a sub_umbrella framework is recorded in the following structure.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SubUmbrellaCommand {
     /// LC_SUB_UMBRELLA
     pub cmd:     u32,
@@ -301,7 +298,7 @@ pub const SIZEOF_SUB_UMBRELLA_COMMAND: usize = 12;
 /// The name of a sub_library framework is recorded in the following structure.
 /// For example /usr/lib/libobjc_profile.A.dylib would be recorded as "libobjc".
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SubLibraryCommand {
     /// LC_SUB_LIBRARY
     pub cmd:     u32,
@@ -321,7 +318,7 @@ pub const SIZEOF_SUB_LIBRARY_COMMAND: usize = 12;
 /// of the first byte.  So the bit for the Nth module is:
 /// (linked_modules[N/8] >> N%8) & 1
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct PreboundDylibCommand {
     /// LC_PREBOUND_DYLIB
     pub cmd:     u32,
@@ -340,7 +337,7 @@ pub const SIZEOF_PREBOUND_DYLIB_COMMAND: usize = 20;
 
 /// The name of the dynamic linker
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DylinkerCommand {
     pub cmd:     u32,
     pub cmdsize: u32,
@@ -374,42 +371,173 @@ pub const SIZEOF_DYLINKER_COMMAND: usize = 12;
 // struct XXX_thread_state state   thread state for this flavor
 // ...
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Copy)]
 pub struct ThreadCommand {
     /// LC_THREAD or  LC_UNIXTHREAD
     pub cmd:     u32,
     /// total size of this command
     pub cmdsize: u32,
+
+    /// flavor of thread state (but you also need to know the `cputype`)
     pub flavor: u32,
+
+    /// number of elements in `thread_state` that are valid
     pub count: u32,
-    /// NOTE: this is actually, in classic mach-o style, a semi-tagged union-esque struct, and is _not_ properly handled here for arches other than i386... e.g., this is incorrect for powerpc, armv7, etc.
-    /// TODO: We need to implement a simple getter for the thread state; or even better, a method that simply returns the entry point (which is what we usually want)
-    pub thread_state: I386ThreadState,
+
+    /// The raw thread state, details of which varies by CPU
+    pub thread_state: [u32; 70],
 }
 
-/// Main thread state consists of
-/// general registers, segment registers,
-/// eip and eflags.
-///
-#[repr(packed)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
-pub struct I386ThreadState {
-    pub eax: u32,
-    pub ebx: u32,
-    pub ecx: u32,
-    pub edx: u32,
-    pub edi: u32,
-    pub esi: u32,
-    pub ebp: u32,
-    pub esp: u32,
-    pub ss: u32,
-    pub eflags: u32,
-    pub eip: u32,
-    pub cs: u32,
-    pub ds: u32,
-    pub es: u32,
-    pub fs: u32,
-    pub gs: u32,
+impl ThreadCommand {
+    pub fn instruction_pointer(&self, cputype: super::cputype::CpuType) -> error::Result<u64> {
+        // The thread command includes a `flavor` value which distinguishes between related thread
+        // states. However, `dyld` ignores this entirely, blindly interpreting the thread state
+        // values as a machine-specific set of registers matching the build configuration of the
+        // active `dyld` binary.
+        //
+        // Really the only thing that `dyld` cares is that the Mach header's `cputype`, so that's
+        // what we use here.
+        match cputype {
+            super::cputype::CPU_TYPE_X86 => {
+                // struct i386_thread_state_t {
+                //   uint32_t eax;
+                //   uint32_t ebx;
+                //   uint32_t ecx;
+                //   uint32_t edx;
+                //   uint32_t edi;
+                //   uint32_t esi;
+                //   uint32_t ebp;
+                //   uint32_t esp;
+                //   uint32_t ss;
+                //   uint32_t eflags;
+                //   uint32_t eip;
+                //   uint32_t cs;
+                //   uint32_t ds;
+                //   uint32_t es;
+                //   uint32_t fs;
+                //   uint32_t gs;
+                // }
+                let eip: u32 = self.thread_state[10];
+                Ok(eip as u64)
+            },
+            super::cputype::CPU_TYPE_X86_64 => {
+                // struct x86_thread_state64_t {
+                //   uint64_t rax;
+                //   uint64_t rbx;
+                //   uint64_t rcx;
+                //   uint64_t rdx;
+                //   uint64_t rdi;
+                //   uint64_t rsi;
+                //   uint64_t rbp;
+                //   uint64_t rsp;
+                //   uint64_t r8;
+                //   uint64_t r9;
+                //   uint64_t r10;
+                //   uint64_t r11;
+                //   uint64_t r12;
+                //   uint64_t r13;
+                //   uint64_t r14;
+                //   uint64_t r15;
+                //   uint64_t rip;
+                //   uint64_t rflags;
+                //   uint64_t cs;
+                //   uint64_t fs;
+                //   uint64_t gs;
+                // }
+                let rip: u64 =
+                       (self.thread_state[32] as u64)
+                    | ((self.thread_state[33] as u64) << 32);
+                Ok(rip)
+            }
+            super::cputype::CPU_TYPE_ARM => {
+                // struct arm_thread_state32_t {
+                //   uint32_t r[13];
+                //   uint32_t sp;
+                //   uint32_t lr;
+                //   uint32_t pc;
+                //   uint32_t cpsr;
+                // }
+                let pc: u32 = self.thread_state[15];
+                Ok(pc as u64)
+            }
+            super::cputype::CPU_TYPE_ARM64 => {
+                // struct arm_thread_state64_t {
+                //   uint64_t x[29];
+                //   uint64_t fp;
+                //   uint64_t lr;
+                //   uint64_t sp;
+                //   uint64_t pc;
+                //   uint32_t cpsr;
+                //   uint32_t pad;
+                // }
+                let pc: u64 =
+                       (self.thread_state[64] as u64)
+                    | ((self.thread_state[65] as u64) << 32);
+                Ok(pc)
+            }
+            _ => {
+                Err(error::Error::Malformed(format!("unable to find instruction pointer for cputype {:?}", cputype)))
+            }
+        }
+    }
+}
+
+impl<'a> ctx::TryFromCtx<'a, Endian> for ThreadCommand {
+    type Error = ::error::Error;
+    type Size = usize;
+    fn try_from_ctx(bytes: &'a [u8], le: Endian) -> error::Result<(Self, Self::Size)> {
+        use scroll::{Pread};
+        let lc = bytes.pread_with::<LoadCommandHeader>(0, le)?;
+
+        // read the thread state flavor and length of the thread state
+        let flavor: u32 = bytes.pread_with(8, le)?;
+        let count: u32 = bytes.pread_with(12, le)?;
+
+        // get a byte slice of the thread state
+        let thread_state_byte_length = count as usize * 4;
+        let thread_state_bytes = &bytes[16..16+thread_state_byte_length];
+
+        // check the length
+        if thread_state_bytes.len() < thread_state_byte_length {
+            return Err(error::Error::Malformed(format!("thread command specifies {} bytes for thread state but has only {}", thread_state_byte_length, thread_state_bytes.len())));
+        }
+        if count > 70 {
+            return Err(error::Error::Malformed(format!("thread command specifies {} longs for thread state but we handle only 70", count)));
+        }
+
+        // read the thread state
+        let mut thread_state: [u32; 70] = [ 0; 70 ];
+        for i in 0..count as usize {
+            thread_state[i] = thread_state_bytes.pread_with(i*4, le)?;
+        }
+
+        Ok((ThreadCommand{
+            cmd: lc.cmd,
+            cmdsize: lc.cmdsize,
+            flavor: flavor,
+            count: count,
+            thread_state: thread_state,
+        }, lc.cmdsize as _))
+    }
+}
+
+impl Clone for ThreadCommand {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[cfg(feature = "std")]
+impl fmt::Debug for ThreadCommand {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("ThreadCommand")
+            .field("cmd",          &self.cmd)
+            .field("cmdsize",      &self.cmdsize)
+            .field("flavor",       &self.flavor)
+            .field("count",        &self.count)
+            .field("thread_state", &&self.thread_state[..])
+            .finish()
+    }
 }
 
 /// The routines command contains the address of the dynamic shared library
@@ -419,7 +547,7 @@ pub struct I386ThreadState {
 /// and then calls it.  This gets called before any module initialization
 /// routines (used for C++ static constructors) in the library.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct RoutinesCommand32 {
     /// LC_ROUTINES
     pub cmd:         u32,
@@ -439,7 +567,7 @@ pub struct RoutinesCommand32 {
 
 /// The 64-bit routines command.  Same use as above.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct RoutinesCommand64 {
     /// LC_ROUTINES_64
     pub cmd:          u32,
@@ -458,7 +586,7 @@ pub struct RoutinesCommand64 {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SymtabCommand {
   pub cmd:     u32,
   pub cmdsize: u32,
@@ -466,6 +594,19 @@ pub struct SymtabCommand {
   pub nsyms:   u32,
   pub stroff:  u32,
   pub strsize: u32,
+}
+
+impl SymtabCommand {
+    pub fn new() -> Self {
+        SymtabCommand {
+            cmd: LC_SYMTAB,
+            cmdsize: SIZEOF_SYMTAB_COMMAND as u32,
+            symoff: 0,
+            nsyms: 0,
+            stroff: 0,
+            strsize: 0,
+        }
+    }
 }
 
 pub const SIZEOF_SYMTAB_COMMAND: usize = 24;
@@ -509,7 +650,7 @@ pub const SIZEOF_SYMTAB_COMMAND: usize = 24;
 /// For executable and object modules the relocation entries continue to hang
 /// off the section structures.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DysymtabCommand {
     pub cmd: u32,
     pub cmdsize: u32,
@@ -551,12 +692,39 @@ pub struct DysymtabCommand {
     pub nlocrel:        u32,
 }
 
+impl DysymtabCommand {
+    pub fn new() -> Self {
+        DysymtabCommand {
+            cmd: LC_DYSYMTAB,
+            cmdsize: SIZEOF_DYSYMTAB_COMMAND as u32,
+            ilocalsym:      0,
+            nlocalsym:      0,
+            iextdefsym:     0,
+            nextdefsym:     0,
+            iundefsym:      0,
+            nundefsym:      0,
+            tocoff:         0,
+            ntoc:           0,
+            modtaboff:      0,
+            nmodtab:        0,
+            extrefsymoff:   0,
+            nextrefsyms:    0,
+            indirectsymoff: 0,
+            nindirectsyms:  0,
+            extreloff:      0,
+            nextrel:        0,
+            locreloff:      0,
+            nlocrel:        0,
+        }
+    }
+}
+
 pub const SIZEOF_DYSYMTAB_COMMAND: usize = 80;
 
 // TODO: unimplemented
 /// a table of contents entry
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DylibTableOfContents {
     /// the defined external symbol (index into the symbol table)
     pub symbol_index: u32,
@@ -567,7 +735,7 @@ pub struct DylibTableOfContents {
 // TODO: unimplemented
 /// a module table entry
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DylibModule {
     /// the module name (index into string table)
     pub module_name: u32,
@@ -602,7 +770,7 @@ pub struct DylibModule {
 // TODO: unimplemented
 /// a 64-bit module table entry
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DylibModule64 {
     /// the module name (index into string table)
     pub module_name: u32,
@@ -643,7 +811,7 @@ pub struct DylibModule64 {
 /// reference that is being made.  The constants for the flags are defined in
 /// <mach-o/nlist.h> as they are also used for symbol table entries.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DylibReference {
     /// 24 bits bit-field index into the symbol table
     pub isym: [u8; 24],
@@ -654,7 +822,7 @@ pub struct DylibReference {
 /// The twolevel_hints_command contains the offset and number of hints in the
 /// two-level namespace lookup hints table.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct TwolevelHintsCommand {
     /// LC_TWOLEVEL_HINTS
     pub cmd: u32,
@@ -681,7 +849,7 @@ pub struct TwolevelHintsCommand {
 /// library's table of contents.  This is used as the starting point of the
 /// binary search or a directed linear search.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct TwolevelHint {
     /// index into the sub images
     pub isub_image: u64,
@@ -699,7 +867,7 @@ pub struct TwolevelHint {
 /// input file.
 // TODO: unimplemented
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct PrebindCksumCommand {
     /// LC_PREBIND_CKSUM
     pub cmd: u32,
@@ -712,7 +880,7 @@ pub struct PrebindCksumCommand {
 /// The uuid load command contains a single 128-bit unique random number that
 /// identifies an object produced by the static link editor.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct UuidCommand {
     /// LC_UUID
     pub cmd: u32,
@@ -727,7 +895,7 @@ pub const SIZEOF_UUID_COMMAND: usize = 24;
 /// The rpath_command contains a path which at runtime should be added to
 /// the current run path used to find @rpath prefixed dylibs.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct RpathCommand {
     /// LC_RPATH
     pub cmd: u32,
@@ -742,7 +910,7 @@ pub const SIZEOF_RPATH_COMMAND: usize = 12;
 /// The linkedit_data_command contains the offsets and sizes of a blob
 /// of data in the __LINKEDIT segment.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct LinkeditDataCommand {
     /// LC_CODE_SIGNATURE, LC_SEGMENT_SPLIT_INFO, LC_FUNCTION_STARTS, LC_DATA_IN_CODE, LC_DYLIB_CODE_SIGN_DRS or LC_LINKER_OPTIMIZATION_HINT.
     pub cmd: u32,
@@ -759,7 +927,7 @@ pub const SIZEOF_LINKEDIT_DATA_COMMAND: usize = 16;
 /// The encryption_info_command contains the file offset and size of an
 /// of an encrypted segment.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct EncryptionInfoCommand32 {
     /// LC_ENCRYPTION_INFO
     pub cmd: u32,
@@ -778,7 +946,7 @@ pub const SIZEOF_ENCRYPTION_INFO_COMMAND_32: usize = 20;
 /// The encryption_info_command_64 contains the file offset and size of an
 /// of an encrypted segment (for use in x86_64 targets).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct EncryptionInfoCommand64 {
     /// LC_ENCRYPTION_INFO_64
     pub cmd: u32,
@@ -801,7 +969,7 @@ pub const SIZEOF_ENCRYPTION_INFO_COMMAND_64: usize = 24;
 ///
 /// LC_VERSION_MIN_MACOSX or LC_VERSION_MIN_IPHONEOS
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct VersionMinCommand {
     pub cmd: u32,
     pub cmdsize: u32,
@@ -809,6 +977,17 @@ pub struct VersionMinCommand {
     pub version: u32,
     /// X.Y.Z is encoded in nibbles xxxx.yy.zz
     pub sdk: u32,
+}
+
+impl VersionMinCommand {
+    pub fn new(is_ios: bool) -> Self {
+        VersionMinCommand {
+            cmd: if is_ios { LC_VERSION_MIN_IPHONEOS } else { LC_VERSION_MIN_MACOSX },
+            cmdsize: SIZEOF_VERSION_MIN_COMMAND as u32,
+            version: 0,
+            sdk: 0,
+        }
+    }
 }
 
 pub const SIZEOF_VERSION_MIN_COMMAND: usize = 16;
@@ -846,7 +1025,7 @@ pub const SIZEOF_DYLIB_INFO_COMMAND: usize = 48;
 
 /// The linker_option_command contains linker options embedded in object files.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct LinkerOptionCommand {
     /// LC_LINKER_OPTION only used in MH_OBJECT fipub constypes
     pub cmd: u32,
@@ -865,7 +1044,7 @@ pub const SIZEOF_LINKER_OPTION_COMMAND: usize = 12;
 /// roots also being a multiple of a long.  Also the padding must again be
 /// zeroed. (THIS IS OBSOLETE and no longer supported).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SymsegCommand {
     /// LC_SYMSEG
     pub cmd: u32,
@@ -884,7 +1063,7 @@ pub const SIZEOF_SYMSEG_COMMAND: usize = 16;
 /// the command is padded out with zero bytes to a multiple of 4 bytes/
 /// (THIS IS OBSOLETE and no longer supported).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct IdentCommand {
     /// LC_IDENT
     pub cmd: u32,
@@ -899,7 +1078,7 @@ pub const SIZEOF_IDENT_COMMAND: usize = 8;
 /// internal use.  The kernel ignores this command when loading a program into
 /// memory).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct FvmfileCommand {
     /// LC_FVMFILE
     pub cmd: u32,
@@ -918,7 +1097,7 @@ pub const SIZEOF_FVMFILE_COMMAND: usize = 16;
 /// of main().  If -stack_size was used at link time, the stacksize
 /// field will contain the stack size need for the main thread.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct EntryPointCommand {
     pub cmd: u32,
     pub cmdsize: u32,
@@ -933,7 +1112,7 @@ pub const SIZEOF_ENTRY_POINT_COMMAND: usize = 24;
 /// The source_version_command is an optional load command containing
 /// the version of the sources used to build the binary.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct SourceVersionCommand {
     /// LC_SOURCE_VERSION
     pub cmd: u32,
@@ -946,7 +1125,7 @@ pub struct SourceVersionCommand {
 /// to point to an array of data_in_code_entry entries. Each entry
 /// describes a range of data in a code section.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, SizeWith)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct DataInCodeEntry {
     /// from mach_header to start of data range
     pub offset: u32,
@@ -1067,6 +1246,7 @@ pub fn cmd_to_str(cmd: u32) -> &'static str {
 ///////////////////////////////////////////
 
 #[derive(Debug)]
+/// The various load commands as a cast-free variant/enum
 pub enum CommandVariant {
     Segment32              (SegmentCommand32),
     Segment64              (SegmentCommand64),
@@ -1118,64 +1298,65 @@ pub enum CommandVariant {
     Unimplemented          (LoadCommandHeader),
 }
 
-impl<'a> ctx::TryFromCtx<'a, (usize, ctx::DefaultCtx)> for CommandVariant {
-    type Error = error::Error;
-    fn try_from_ctx(bytes: &'a [u8], (offset, le): (usize, Endian)) -> error::Result<Self> {
+impl<'a> ctx::TryFromCtx<'a, Endian> for CommandVariant {
+    type Error = ::error::Error;
+    type Size = usize;
+    fn try_from_ctx(bytes: &'a [u8], le: Endian) -> error::Result<(Self, Self::Size)> {
         use scroll::{Pread};
         use self::CommandVariant::*;
-        let lc = bytes.pread_with::<LoadCommandHeader>(offset, le)?;
+        let lc = bytes.pread_with::<LoadCommandHeader>(0, le)?;
         let size = lc.cmdsize as usize;
         //println!("offset {:#x} cmd: {:#x} size: {:?} ctx: {:?}", offset, lc.cmd, size, le);
-        if offset + size > bytes.len() { return Err(error::Error::Malformed(format!("{} has size larger than remainder of binary: {:?}", &lc, bytes.len()))) }
+        if size > bytes.len() { return Err(error::Error::Malformed(format!("{} has size larger than remainder of binary: {:?}", &lc, bytes.len()))) }
         match lc.cmd {
-            LC_SEGMENT    => {              let comm = bytes.pread_with::<SegmentCommand32>       (offset, le)?;  Ok(Segment32              (comm))},
-            LC_SEGMENT_64 => {              let comm = bytes.pread_with::<SegmentCommand64>       (offset, le)?;  Ok(Segment64              (comm))},
-            LC_DYSYMTAB => {                let comm = bytes.pread_with::<DysymtabCommand>        (offset, le)?;  Ok(Dysymtab               (comm))},
-            LC_LOAD_DYLINKER => {           let comm = bytes.pread_with::<DylinkerCommand>        (offset, le)?;  Ok(LoadDylinker           (comm))},
-            LC_ID_DYLINKER => {             let comm = bytes.pread_with::<DylinkerCommand>        (offset, le)?;  Ok(IdDylinker             (comm))},
-            LC_UUID => {                    let comm = bytes.pread_with::<UuidCommand>            (offset, le)?;  Ok(Uuid                   (comm))},
-            LC_SYMTAB => {                  let comm = bytes.pread_with::<SymtabCommand>          (offset, le)?;  Ok(Symtab                 (comm))},
-            LC_SYMSEG => {                  let comm = bytes.pread_with::<SymsegCommand>          (offset, le)?;  Ok(Symseg                 (comm))},
-            LC_THREAD => {                  let comm = bytes.pread_with::<ThreadCommand>          (offset, le)?;  Ok(Thread                 (comm))},
-            LC_UNIXTHREAD => {              let comm = bytes.pread_with::<ThreadCommand>          (offset, le)?;  Ok(Unixthread             (comm))},
-            LC_LOADFVMLIB => {              let comm = bytes.pread_with::<FvmlibCommand>          (offset, le)?;  Ok(LoadFvmlib             (comm))},
-            LC_IDFVMLIB => {                let comm = bytes.pread_with::<FvmlibCommand>          (offset, le)?;  Ok(IdFvmlib               (comm))},
-            LC_IDENT => {                   let comm = bytes.pread_with::<IdentCommand>           (offset, le)?;  Ok(Ident                  (comm))},
-            LC_FVMFILE => {                 let comm = bytes.pread_with::<FvmfileCommand>         (offset, le)?;  Ok(Fvmfile                (comm))},
-            LC_PREPAGE => {                 let comm = bytes.pread_with::<LoadCommandHeader>      (offset, le)?;  Ok(Prepage                (comm))},
-            LC_LOAD_DYLIB => {              let comm = bytes.pread_with::<DylibCommand>           (offset, le)?;  Ok(LoadDylib              (comm))},
-            LC_ID_DYLIB => {                let comm = bytes.pread_with::<DylibCommand>           (offset, le)?;  Ok(IdDylib                (comm))},
-            LC_PREBOUND_DYLIB => {          let comm = bytes.pread_with::<PreboundDylibCommand>   (offset, le)?;  Ok(PreboundDylib          (comm))},
-            LC_ROUTINES => {                let comm = bytes.pread_with::<RoutinesCommand32>      (offset, le)?;  Ok(Routines32             (comm))},
-            LC_ROUTINES_64 => {             let comm = bytes.pread_with::<RoutinesCommand64>      (offset, le)?;  Ok(Routines64             (comm))},
-            LC_SUB_FRAMEWORK => {           let comm = bytes.pread_with::<SubFrameworkCommand>    (offset, le)?;  Ok(SubFramework           (comm))},
-            LC_SUB_UMBRELLA => {            let comm = bytes.pread_with::<SubUmbrellaCommand>     (offset, le)?;  Ok(SubUmbrella            (comm))},
-            LC_SUB_CLIENT => {              let comm = bytes.pread_with::<SubClientCommand>       (offset, le)?;  Ok(SubClient              (comm))},
-            LC_SUB_LIBRARY => {             let comm = bytes.pread_with::<SubLibraryCommand>      (offset, le)?;  Ok(SubLibrary             (comm))},
-            LC_TWOLEVEL_HINTS => {          let comm = bytes.pread_with::<TwolevelHintsCommand>   (offset, le)?;  Ok(TwolevelHints          (comm))},
-            LC_PREBIND_CKSUM => {           let comm = bytes.pread_with::<PrebindCksumCommand>    (offset, le)?;  Ok(PrebindCksum           (comm))},
-            LC_LOAD_WEAK_DYLIB => {         let comm = bytes.pread_with::<DylibCommand>           (offset, le)?;  Ok(LoadWeakDylib          (comm))},
-            LC_RPATH => {                   let comm = bytes.pread_with::<RpathCommand>           (offset, le)?;  Ok(Rpath                  (comm))},
-            LC_CODE_SIGNATURE => {          let comm = bytes.pread_with::<LinkeditDataCommand>    (offset, le)?;  Ok(CodeSignature          (comm))},
-            LC_SEGMENT_SPLIT_INFO => {      let comm = bytes.pread_with::<LinkeditDataCommand>    (offset, le)?;  Ok(SegmentSplitInfo       (comm))},
-            LC_REEXPORT_DYLIB => {          let comm = bytes.pread_with::<DylibCommand>           (offset, le)?;  Ok(ReexportDylib          (comm))},
-            LC_LAZY_LOAD_DYLIB => {         let comm = bytes.pread_with::<DylibCommand>           (offset, le)?;  Ok(LazyLoadDylib          (comm))},
-            LC_ENCRYPTION_INFO => {         let comm = bytes.pread_with::<EncryptionInfoCommand32>(offset, le)?;  Ok(EncryptionInfo32       (comm))},
-            LC_ENCRYPTION_INFO_64 => {      let comm = bytes.pread_with::<EncryptionInfoCommand64>(offset, le)?;  Ok(EncryptionInfo64       (comm))},
-            LC_DYLD_INFO => {               let comm = bytes.pread_with::<DyldInfoCommand>        (offset, le)?;  Ok(DyldInfo               (comm))},
-            LC_DYLD_INFO_ONLY => {          let comm = bytes.pread_with::<DyldInfoCommand>        (offset, le)?;  Ok(DyldInfoOnly           (comm))},
-            LC_LOAD_UPWARD_DYLIB => {       let comm = bytes.pread_with::<DylibCommand>           (offset, le)?;  Ok(LoadUpwardDylib        (comm))},
-            LC_VERSION_MIN_MACOSX => {      let comm = bytes.pread_with::<VersionMinCommand>      (offset, le)?;  Ok(VersionMinMacosx       (comm))},
-            LC_VERSION_MIN_IPHONEOS => {    let comm = bytes.pread_with::<VersionMinCommand>      (offset, le)?;  Ok(VersionMinIphoneos     (comm))},
-            LC_FUNCTION_STARTS => {         let comm = bytes.pread_with::<LinkeditDataCommand>    (offset, le)?;  Ok(FunctionStarts         (comm))},
-            LC_DYLD_ENVIRONMENT => {        let comm = bytes.pread_with::<DylinkerCommand>        (offset, le)?;  Ok(DyldEnvironment        (comm))},
-            LC_MAIN => {                    let comm = bytes.pread_with::<EntryPointCommand>      (offset, le)?;  Ok(Main                   (comm))},
-            LC_DATA_IN_CODE => {            let comm = bytes.pread_with::<LinkeditDataCommand>    (offset, le)?;  Ok(DataInCode             (comm))},
-            LC_SOURCE_VERSION => {          let comm = bytes.pread_with::<SourceVersionCommand>   (offset, le)?;  Ok(SourceVersion          (comm))},
-            LC_DYLIB_CODE_SIGN_DRS => {     let comm = bytes.pread_with::<LinkeditDataCommand>    (offset, le)?;  Ok(DylibCodeSignDrs       (comm))},
-            LC_LINKER_OPTION => {           let comm = bytes.pread_with::<LinkeditDataCommand>    (offset, le)?;  Ok(LinkerOption           (comm))},
-            LC_LINKER_OPTIMIZATION_HINT => {let comm = bytes.pread_with::<LinkeditDataCommand>    (offset, le)?;  Ok(LinkerOptimizationHint (comm))},
-            _ =>                                                                                                   Ok(Unimplemented          (lc.clone())),
+            LC_SEGMENT    => {              let comm = bytes.pread_with::<SegmentCommand32>       (0, le)?;  Ok((Segment32              (comm), size))},
+            LC_SEGMENT_64 => {              let comm = bytes.pread_with::<SegmentCommand64>       (0, le)?;  Ok((Segment64              (comm), size))},
+            LC_DYSYMTAB => {                let comm = bytes.pread_with::<DysymtabCommand>        (0, le)?;  Ok((Dysymtab               (comm), size))},
+            LC_LOAD_DYLINKER => {           let comm = bytes.pread_with::<DylinkerCommand>        (0, le)?;  Ok((LoadDylinker           (comm), size))},
+            LC_ID_DYLINKER => {             let comm = bytes.pread_with::<DylinkerCommand>        (0, le)?;  Ok((IdDylinker             (comm), size))},
+            LC_UUID => {                    let comm = bytes.pread_with::<UuidCommand>            (0, le)?;  Ok((Uuid                   (comm), size))},
+            LC_SYMTAB => {                  let comm = bytes.pread_with::<SymtabCommand>          (0, le)?;  Ok((Symtab                 (comm), size))},
+            LC_SYMSEG => {                  let comm = bytes.pread_with::<SymsegCommand>          (0, le)?;  Ok((Symseg                 (comm), size))},
+            LC_THREAD => {                  let comm = bytes.pread_with::<ThreadCommand>          (0, le)?;  Ok((Thread                 (comm), size))},
+            LC_UNIXTHREAD => {              let comm = bytes.pread_with::<ThreadCommand>          (0, le)?;  Ok((Unixthread             (comm), size))},
+            LC_LOADFVMLIB => {              let comm = bytes.pread_with::<FvmlibCommand>          (0, le)?;  Ok((LoadFvmlib             (comm), size))},
+            LC_IDFVMLIB => {                let comm = bytes.pread_with::<FvmlibCommand>          (0, le)?;  Ok((IdFvmlib               (comm), size))},
+            LC_IDENT => {                   let comm = bytes.pread_with::<IdentCommand>           (0, le)?;  Ok((Ident                  (comm), size))},
+            LC_FVMFILE => {                 let comm = bytes.pread_with::<FvmfileCommand>         (0, le)?;  Ok((Fvmfile                (comm), size))},
+            LC_PREPAGE => {                 let comm = bytes.pread_with::<LoadCommandHeader>      (0, le)?;  Ok((Prepage                (comm), size))},
+            LC_LOAD_DYLIB => {              let comm = bytes.pread_with::<DylibCommand>           (0, le)?;  Ok((LoadDylib              (comm), size))},
+            LC_ID_DYLIB => {                let comm = bytes.pread_with::<DylibCommand>           (0, le)?;  Ok((IdDylib                (comm), size))},
+            LC_PREBOUND_DYLIB => {          let comm = bytes.pread_with::<PreboundDylibCommand>   (0, le)?;  Ok((PreboundDylib          (comm), size))},
+            LC_ROUTINES => {                let comm = bytes.pread_with::<RoutinesCommand32>      (0, le)?;  Ok((Routines32             (comm), size))},
+            LC_ROUTINES_64 => {             let comm = bytes.pread_with::<RoutinesCommand64>      (0, le)?;  Ok((Routines64             (comm), size))},
+            LC_SUB_FRAMEWORK => {           let comm = bytes.pread_with::<SubFrameworkCommand>    (0, le)?;  Ok((SubFramework           (comm), size))},
+            LC_SUB_UMBRELLA => {            let comm = bytes.pread_with::<SubUmbrellaCommand>     (0, le)?;  Ok((SubUmbrella            (comm), size))},
+            LC_SUB_CLIENT => {              let comm = bytes.pread_with::<SubClientCommand>       (0, le)?;  Ok((SubClient              (comm), size))},
+            LC_SUB_LIBRARY => {             let comm = bytes.pread_with::<SubLibraryCommand>      (0, le)?;  Ok((SubLibrary             (comm), size))},
+            LC_TWOLEVEL_HINTS => {          let comm = bytes.pread_with::<TwolevelHintsCommand>   (0, le)?;  Ok((TwolevelHints          (comm), size))},
+            LC_PREBIND_CKSUM => {           let comm = bytes.pread_with::<PrebindCksumCommand>    (0, le)?;  Ok((PrebindCksum           (comm), size))},
+            LC_LOAD_WEAK_DYLIB => {         let comm = bytes.pread_with::<DylibCommand>           (0, le)?;  Ok((LoadWeakDylib          (comm), size))},
+            LC_RPATH => {                   let comm = bytes.pread_with::<RpathCommand>           (0, le)?;  Ok((Rpath                  (comm), size))},
+            LC_CODE_SIGNATURE => {          let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((CodeSignature          (comm), size))},
+            LC_SEGMENT_SPLIT_INFO => {      let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((SegmentSplitInfo       (comm), size))},
+            LC_REEXPORT_DYLIB => {          let comm = bytes.pread_with::<DylibCommand>           (0, le)?;  Ok((ReexportDylib          (comm), size))},
+            LC_LAZY_LOAD_DYLIB => {         let comm = bytes.pread_with::<DylibCommand>           (0, le)?;  Ok((LazyLoadDylib          (comm), size))},
+            LC_ENCRYPTION_INFO => {         let comm = bytes.pread_with::<EncryptionInfoCommand32>(0, le)?;  Ok((EncryptionInfo32       (comm), size))},
+            LC_ENCRYPTION_INFO_64 => {      let comm = bytes.pread_with::<EncryptionInfoCommand64>(0, le)?;  Ok((EncryptionInfo64       (comm), size))},
+            LC_DYLD_INFO => {               let comm = bytes.pread_with::<DyldInfoCommand>        (0, le)?;  Ok((DyldInfo               (comm), size))},
+            LC_DYLD_INFO_ONLY => {          let comm = bytes.pread_with::<DyldInfoCommand>        (0, le)?;  Ok((DyldInfoOnly           (comm), size))},
+            LC_LOAD_UPWARD_DYLIB => {       let comm = bytes.pread_with::<DylibCommand>           (0, le)?;  Ok((LoadUpwardDylib        (comm), size))},
+            LC_VERSION_MIN_MACOSX => {      let comm = bytes.pread_with::<VersionMinCommand>      (0, le)?;  Ok((VersionMinMacosx       (comm), size))},
+            LC_VERSION_MIN_IPHONEOS => {    let comm = bytes.pread_with::<VersionMinCommand>      (0, le)?;  Ok((VersionMinIphoneos     (comm), size))},
+            LC_FUNCTION_STARTS => {         let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((FunctionStarts         (comm), size))},
+            LC_DYLD_ENVIRONMENT => {        let comm = bytes.pread_with::<DylinkerCommand>        (0, le)?;  Ok((DyldEnvironment        (comm), size))},
+            LC_MAIN => {                    let comm = bytes.pread_with::<EntryPointCommand>      (0, le)?;  Ok((Main                   (comm), size))},
+            LC_DATA_IN_CODE => {            let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((DataInCode             (comm), size))},
+            LC_SOURCE_VERSION => {          let comm = bytes.pread_with::<SourceVersionCommand>   (0, le)?;  Ok((SourceVersion          (comm), size))},
+            LC_DYLIB_CODE_SIGN_DRS => {     let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((DylibCodeSignDrs       (comm), size))},
+            LC_LINKER_OPTION => {           let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((LinkerOption           (comm), size))},
+            LC_LINKER_OPTIMIZATION_HINT => {let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((LinkerOptimizationHint (comm), size))},
+            _ =>                                                                                             Ok((Unimplemented          (lc.clone()), size)),
         }
     }
 }
@@ -1237,7 +1418,7 @@ impl CommandVariant {
     }
     pub fn cmd(&self) -> u32 {
         use self::CommandVariant::*;
-        let cmd = match *self {
+        match *self {
             Segment32              (comm) => comm.cmd,
             Segment64              (comm) => comm.cmd,
             Uuid                   (comm) => comm.cmd,
@@ -1286,278 +1467,26 @@ impl CommandVariant {
             LinkerOption           (comm) => comm.cmd,
             LinkerOptimizationHint (comm) => comm.cmd,
             Unimplemented          (comm) => comm.cmd,
-        };
-        cmd
+        }
     }
 }
 
 #[derive(Debug)]
+/// A tagged LoadCommand union
 pub struct LoadCommand {
+    /// The offset this load command occurs at
     pub offset: usize,
+    /// Which load command this is inside a variant
     pub command: CommandVariant,
 }
 
 impl LoadCommand {
-    pub fn parse(bytes: &[u8], mut offset: &mut usize, le: scroll::Endian) -> error::Result<Self> {
+    /// Parse a load command from `bytes` at `offset` with the `le` endianness
+    pub fn parse(bytes: &[u8], offset: &mut usize, le: scroll::Endian) -> error::Result<Self> {
         let start = *offset;
         let command = bytes.pread_with::<CommandVariant>(start, le)?;
         let size = command.cmdsize();
         *offset = start + size;
         Ok(LoadCommand { offset: start, command: command })
-    }
-}
-
-/// Generalized 32/64 bit Section, with attached section data
-pub struct Section<'a> {
-    /// name of this section
-    pub sectname:  [u8; 16],
-    /// segment this section goes in
-    pub segname:   [u8; 16],
-    /// memory address of this section
-    pub addr:      u64,
-    /// size in bytes of this section
-    pub size:      u64,
-    /// file offset of this section
-    pub offset:    u32,
-    /// section alignment (power of 2)
-    pub align:     u32,
-    /// file offset of relocation entries
-    pub reloff:    u32,
-    /// number of relocation entries
-    pub nreloc:    u32,
-    /// flags (section type and attributes
-    pub flags:     u32,
-    /// The data inside this section
-    pub data:      &'a [u8],
-}
-
-impl<'a> fmt::Debug for Section<'a> {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_struct("Section")
-            .field("sectname", &self.sectname.pread::<&str>(0).unwrap())
-            .field("segname",  &self.segname.pread::<&str>(0).unwrap())
-            .field("addr",     &self.addr)
-            .field("size",     &self.size)
-            .field("offset",   &self.offset)
-            .field("align",    &self.align)
-            .field("reloff",   &self.reloff)
-            .field("nreloc",   &self.nreloc)
-            .field("flags",    &self.flags)
-            .field("data",     &self.data.len())
-            .finish()
-    }
-}
-
-// TODO: make these try_from_ctx as the offset + size can be bad and thus cause failure
-impl<'a> ctx::FromCtx<'a, Section32> for Section<'a> {
-    fn from_ctx(bytes: &'a [u8], section: Section32) -> Self {
-        let start = section.offset as usize;
-        let end = start + section.size as usize;
-        let data = &bytes[start..end];
-        Section {
-            sectname: section.sectname,
-            segname:  section.segname,
-            addr:     section.addr as u64,
-            size:     section.size as u64,
-            offset:   section.offset,
-            align:    section.align,
-            reloff:   section.reloff,
-            nreloc:   section.nreloc,
-            flags:    section.flags,
-            data:     data
-        }
-    }
-}
-
-impl<'a> ctx::FromCtx<'a, Section64> for Section<'a> {
-    fn from_ctx(bytes: &'a [u8], section: Section64) -> Self {
-        let start = section.offset as usize;
-        let end = start + section.size as usize;
-        let data = &bytes[start..end];
-        Section {
-            sectname: section.sectname,
-            segname:  section.segname,
-            addr:     section.addr,
-            size:     section.size,
-            offset:   section.offset,
-            align:    section.align,
-            reloff:   section.reloff,
-            nreloc:   section.nreloc,
-            flags:    section.flags,
-            data:     data
-        }
-    }
-}
-
-impl<'a> ctx::TryFromCtx<'a, (usize, container::Ctx)> for Section<'a> {
-    type Error = scroll::Error;
-    fn try_from_ctx(bytes: &'a [u8], (offset, ctx): (usize, container::Ctx)) -> Result<Self, Self::Error> {
-        match ctx.container {
-            container::Container::Little => {
-                let section = Section::from_ctx(bytes, bytes.pread_with::<Section32>(offset, ctx.le)?);
-                Ok(section)
-            },
-            container::Container::Big    => {
-                let section = Section::from_ctx(bytes, bytes.pread_with::<Section64>(offset, ctx.le)?);
-                Ok(section)
-            },
-        }
-    }
-}
-
-impl<'a> ctx::SizeWith<container::Ctx> for Section<'a> {
-    type Units = usize;
-    fn size_with(ctx: &container::Ctx) -> usize {
-        match ctx.container {
-            container::Container::Little => SIZEOF_SECTION_32,
-            container::Container::Big    => SIZEOF_SECTION_64,
-        }
-    }
-}
-
-/// Generalized 32/64 bit Segment Command
-pub struct Segment<'a> {
-    pub cmd:      u32,
-    pub cmdsize:  u32,
-    pub segname:  [u8; 16],
-    pub vmaddr:   u64,
-    pub vmsize:   u64,
-    pub fileoff:  u64,
-    pub filesize: u64,
-    pub maxprot:  u32,
-    pub initprot: u32,
-    pub nsects:   u32,
-    pub flags:    u32,
-    pub data:     &'a [u8],
-    offset:       usize,
-    raw_data:     &'a [u8],
-    ctx:          container::Ctx,
-}
-
-impl<'a> fmt::Debug for Segment<'a> {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_struct("Segment")
-            .field("cmd", &self.cmd)
-            .field("cmdsize", &self.cmdsize)
-            .field("segname", &self.segname.pread::<&str>(0).unwrap())
-            .field("vmaddr",  &self.vmaddr)
-            .field("vmsize",  &self.vmsize)
-            .field("fileoff", &self.fileoff)
-            .field("filesize", &self.filesize)
-            .field("maxprot", &self.maxprot)
-            .field("initprot", &self.initprot)
-            .field("nsects", &self.nsects)
-            .field("flags", &self.flags)
-            .field("data", &self.data.len())
-            .field("sections", &self.sections().unwrap())
-            .finish()
-    }
-}
-
-impl<'a> ctx::SizeWith<container::Ctx> for Segment<'a> {
-    type Units = usize;
-    fn size_with(ctx: &container::Ctx) -> usize {
-        match ctx.container {
-            container::Container::Little => SIZEOF_SEGMENT_COMMAND_32,
-            container::Container::Big    => SIZEOF_SEGMENT_COMMAND_64,
-        }
-    }
-}
-
-impl<'a> Segment<'a> {
-    /// Get the name of this segment
-    pub fn name(&self) -> error::Result<&str> {
-        Ok(self.segname.pread::<&str>(0)?)
-    }
-    /// Get the sections from this segment
-    pub fn sections<'b>(&'b self) -> error::Result<Vec<Section<'b>>> {
-        let nsects = self.nsects as usize;
-        let mut sections = Vec::with_capacity(nsects);
-        let offset = &mut (self.offset + Self::size_with(&self.ctx));
-        for _ in 0..nsects {
-            let section = self.raw_data.gread_with::<Section>(offset, self.ctx)?;
-            sections.push(section);
-        }
-        Ok(sections)
-    }
-    /// Convert the raw C 32-bit segment command to a generalized version
-    pub fn from_32(bytes: &'a[u8], segment: &SegmentCommand32, offset: usize, ctx: container::Ctx) -> Self {
-        let data = &bytes[segment.fileoff as usize..(segment.fileoff + segment.filesize) as usize];
-        Segment {
-            cmd:      segment.cmd,
-            cmdsize:  segment.cmdsize,
-            segname:  segment.segname,
-            vmaddr:   segment.vmaddr   as u64,
-            vmsize:   segment.vmsize   as u64,
-            fileoff:  segment.fileoff  as u64,
-            filesize: segment.filesize as u64,
-            maxprot:  segment.maxprot,
-            initprot: segment.initprot,
-            nsects:   segment.nsects,
-            flags:    segment.flags,
-            data:     data,
-            offset:   offset,
-            raw_data: bytes,
-            ctx:      ctx,
-        }
-    }
-    /// Convert the raw C 64-bit segment command to a generalized version
-    pub fn from_64(bytes: &'a [u8], segment: &SegmentCommand64, offset: usize, ctx: container::Ctx) -> Self {
-        let data = &bytes[segment.fileoff as usize..(segment.fileoff + segment.filesize) as usize];
-        Segment {
-            cmd:      segment.cmd,
-            cmdsize:  segment.cmdsize,
-            segname:  segment.segname,
-            vmaddr:   segment.vmaddr,
-            vmsize:   segment.vmsize,
-            fileoff:  segment.fileoff,
-            filesize: segment.filesize,
-            maxprot:  segment.maxprot,
-            initprot: segment.initprot,
-            nsects:   segment.nsects,
-            flags:    segment.flags,
-            offset:   offset,
-            data:     data,
-            raw_data: bytes,
-            ctx:      ctx,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-/// An opaque 32/64-bit container for Mach-o segments
-pub struct Segments<'a> {
-    segments: Vec<Segment<'a>>,
-    ctx: container::Ctx,
-}
-
-impl<'a> Deref for Segments<'a> {
-    type Target = Vec<Segment<'a>>;
-    fn deref(&self) -> &Self::Target {
-        &self.segments
-    }
-}
-
-impl<'a> DerefMut for Segments<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.segments
-    }
-}
-
-impl<'a> Segments<'a> {
-    /// Construct a new generalized segment container from this `ctx`
-    pub fn new(ctx: container::Ctx) -> Self {
-        Segments {
-            segments: Vec::new(),
-            ctx: ctx,
-        }
-    }
-    /// Get every section from every segment
-    pub fn sections<'b>(&'b self) -> error::Result<Vec<Vec<Section<'b>>>> {
-        let mut sections = Vec::new();
-        for segment in &self.segments {
-            sections.push(segment.sections()?);
-        }
-        Ok(sections)
     }
 }

@@ -1,6 +1,8 @@
 //! A PE32 and PE32+ parser
 //!
 
+// TODO: panics with unwrap on None for apisetschema.dll, fhuxgraphics.dll and some others
+
 pub mod header;
 pub mod optional_header;
 pub mod characteristic;
@@ -8,6 +10,7 @@ pub mod section_table;
 pub mod data_directories;
 pub mod export;
 pub mod import;
+pub mod debug;
 mod utils;
 
 use error;
@@ -35,24 +38,29 @@ pub struct PE<'a> {
     /// Data about any exported symbols in this binary (e.g., if it's a `dll`)
     pub export_data: Option<export::ExportData<'a>>,
     /// Data for any imported symbols, and from which `dll`, etc., in this binary
-    pub import_data: Option<import::ImportData>,
+    pub import_data: Option<import::ImportData<'a>>,
     /// The list of exported symbols in this binary, contains synthetic information for easier analysis
-    pub exports: Vec<export::Export>,
+    pub exports: Vec<export::Export<'a>>,
     /// The list symbols imported by this binary from other `dll`s
-    pub imports: Vec<import::Import>,
+    pub imports: Vec<import::Import<'a>>,
     /// The list of libraries which this binary imports symbols from
-    pub libraries: Vec<String>,
+    pub libraries: Vec<&'a str>,
+    /// Debug information, if any, contained in the PE header
+    pub debug_data: Option<debug::DebugData<'a>>
 }
 
 impl<'a> PE<'a> {
     /// Reads a PE binary from the underlying `bytes`
     pub fn parse(bytes: &'a [u8]) -> error::Result<Self> {
         let header = header::Header::parse(bytes)?;
-        let mut offset = &mut (header.dos_header.pe_pointer as usize + header::SIZEOF_COFF_HEADER + header.coff_header.size_of_optional_header as usize);
+        debug!("{:#?}", header);
+        let offset = &mut (header.dos_header.pe_pointer as usize + header::SIZEOF_COFF_HEADER + header.coff_header.size_of_optional_header as usize);
         let nsections = header.coff_header.number_of_sections as usize;
         let mut sections = Vec::with_capacity(nsections);
-        for _ in 0..nsections {
-            sections.push(section_table::SectionTable::parse(bytes, offset)?);
+        for i in 0..nsections {
+            let section = section_table::SectionTable::parse(bytes, offset)?;
+            debug!("({}) {:#?}", i, section);
+            sections.push(section);
         }
         let is_lib = characteristic::is_dll(header.coff_header.characteristics);
         let mut entry = 0;
@@ -63,24 +71,34 @@ impl<'a> PE<'a> {
         let mut imports = vec![];
         let mut import_data = None;
         let mut libraries = vec![];
+        let mut debug_data = None;
         let mut is_64 = false;
         if let Some(optional_header) = header.optional_header {
             entry = optional_header.standard_fields.address_of_entry_point as usize;
             image_base = optional_header.windows_fields.image_base as usize;
             is_64 = optional_header.container()? == container::Container::Big;
+            debug!("entry {:#x} image_base {:#x} is_64: {}", entry, image_base, is_64);
             if let &Some(export_table) = optional_header.data_directories.get_export_table() {
                 let ed = export::ExportData::parse(bytes, &export_table, &sections)?;
+                debug!("export data {:#?}", ed);
                 exports = export::Export::parse(bytes, &ed, &sections)?;
                 name = Some(ed.name);
+                debug!("name: {}", ed.name);
                 export_data = Some(ed);
             }
+            debug!("exports: {:#?}", exports);
             if let &Some(import_table) = optional_header.data_directories.get_import_table() {
                 let id = import::ImportData::parse(bytes, &import_table, &sections)?;
+                debug!("import data {:#?}", id);
                 imports = import::Import::parse(bytes, &id, &sections)?;
-                libraries = id.import_data.iter().map( | data | { data.name.to_owned() }).collect::<Vec<String>>();
+                libraries = id.import_data.iter().map( | data | { data.name }).collect::<Vec<&'a str>>();
                 libraries.sort();
                 libraries.dedup();
                 import_data = Some(id);
+            }
+            debug!("imports: {:#?}", imports);
+            if let &Some(debug_table) = optional_header.data_directories.get_debug_table() {
+                debug_data = Some(debug::DebugData::parse(bytes, &debug_table, &sections)?);
             }
         }
         Ok( PE {
@@ -97,6 +115,7 @@ impl<'a> PE<'a> {
             exports: exports,
             imports: imports,
             libraries: libraries,
+            debug_data: debug_data,
         })
     }
 }

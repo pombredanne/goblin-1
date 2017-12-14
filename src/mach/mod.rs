@@ -14,30 +14,88 @@ pub mod symbols;
 pub mod exports;
 pub mod imports;
 pub mod bind_opcodes;
+pub mod relocation;
+pub mod segment;
 
 pub use self::constants::cputype as cputype;
 
 /// Returns a big endian magical number
-pub fn peek<B: AsRef<[u8]>>(bytes: B, offset: usize) -> error::Result<u32> {
+pub fn peek(bytes: &[u8], offset: usize) -> error::Result<u32> {
     Ok(bytes.pread_with::<u32>(offset, scroll::BE)?)
 }
 
-#[derive(Debug)]
 /// A cross-platform, zero-copy, endian-aware, 32/64 bit Mach-o binary parser
 pub struct MachO<'a> {
+    /// The mach-o header
     pub header: header::Header,
+    /// The load commands tell the kernel and dynamic linker how to use/interpret this binary
     pub load_commands: Vec<load_command::LoadCommand>,
-    pub segments: load_command::Segments<'a>,
+    /// The load command "segments" - typically the pieces of the binary that are loaded into memory
+    pub segments: segment::Segments<'a>,
+    /// The "Nlist" style symbols in this binary - strippable
     pub symbols: Option<symbols::Symbols<'a>>,
+    /// The dylibs this library depends on
     pub libs: Vec<&'a str>,
+    /// The entry point (as a virtual memory address), 0 if none
     pub entry: u64,
+    /// Whether `entry` refers to an older `LC_UNIXTHREAD` instead of the newer `LC_MAIN` entrypoint
+    pub old_style_entry: bool,
+    /// The name of the dylib, if any
     pub name: Option<&'a str>,
+    /// Are we a little-endian binary?
+    pub little_endian: bool,
+    /// Are we a 64-bit binary
+    pub is_64: bool,
+    data: &'a [u8],
     ctx: container::Ctx,
     export_trie: Option<exports::ExportTrie<'a>>,
     bind_interpreter: Option<imports::BindInterpreter<'a>>,
 }
 
+#[cfg(feature = "std")]
+impl<'a> fmt::Debug for MachO<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("MachO")
+            .field("header",          &self.header)
+            .field("load_commands",   &self.load_commands)
+            .field("segments",        &self.segments)
+            .field("entry",           &self.entry)
+            .field("old_style_entry", &self.old_style_entry)
+            .field("libs",            &self.libs)
+            .field("name",            &self.name)
+            .field("little_endian",   &self.little_endian)
+            .field("is_64",           &self.is_64)
+            .field("symbols()",       &self.symbols().collect::<Vec<_>>())
+            .field("exports()",       &self.exports())
+            .field("imports()",       &self.imports())
+            .finish()
+    }
+}
+
 impl<'a> MachO<'a> {
+    pub fn is_object_file(&self) -> bool {
+        self.header.filetype == header::MH_OBJECT
+    }
+    pub fn symbols(&self) -> symbols::SymbolIterator<'a> {
+        if let &Some(ref symbols) = &self.symbols {
+            symbols.into_iter()
+        } else {
+            symbols::SymbolIterator::default()
+        }
+    }
+    pub fn relocations(&self) -> error::Result<Vec<(usize, segment::RelocationIterator, segment::Section)>> {
+        debug!("Iterating relocations");
+        let mut relocs = Vec::new();
+        for (_i, segment) in (&self.segments).into_iter().enumerate() {
+            for (j, section) in segment.into_iter().enumerate() {
+                let (section, _data) = section?;
+                if section.nreloc > 0 {
+                    relocs.push((j, section.iter_relocations(self.data, self.ctx), section));
+                }
+            }
+        }
+        Ok(relocs)
+    }
     /// Return the exported symbols in this binary (if any)
     pub fn exports(&self) -> error::Result<Vec<exports::Export>> {
         if let Some(ref trie) = self.export_trie {
@@ -59,6 +117,8 @@ impl<'a> MachO<'a> {
         let offset = &mut offset;
         let header: header::Header = bytes.pread(*offset)?;
         let ctx = header.ctx()?;
+        let little_endian = ctx.le.is_little();
+        let is_64 = ctx.container.is_big();
         *offset = *offset + header.size();
         let ncmds = header.ncmds;
         let mut cmds: Vec<load_command::LoadCommand> = Vec::with_capacity(ncmds);
@@ -66,17 +126,18 @@ impl<'a> MachO<'a> {
         let mut libs = vec!["self"];
         let mut export_trie = None;
         let mut bind_interpreter = None;
-        let mut entry = 0x0;
+        let mut unixthread_entry_address = None;
+        let mut main_entry_offset = None;
         let mut name = None;
-        let mut segments = load_command::Segments::new(ctx);
+        let mut segments = segment::Segments::new(ctx);
         for _ in 0..ncmds {
             let cmd = load_command::LoadCommand::parse(bytes, offset, ctx.le)?;
             match cmd.command {
                 load_command::CommandVariant::Segment32(command) => {
-                    segments.push(load_command::Segment::from_32(bytes.as_ref(), &command, cmd.offset, ctx))
+                    segments.push(segment::Segment::from_32(bytes.as_ref(), &command, cmd.offset, ctx))
                 },
                 load_command::CommandVariant::Segment64(command) => {
-                    segments.push(load_command::Segment::from_64(bytes.as_ref(), &command, cmd.offset, ctx))
+                    segments.push(segment::Segment::from_64(bytes.as_ref(), &command, cmd.offset, ctx))
                 },
                 load_command::CommandVariant::Symtab(command) => {
                     symbols = Some(symbols::Symbols::parse(bytes, &command, ctx)?);
@@ -94,10 +155,16 @@ impl<'a> MachO<'a> {
                     bind_interpreter = Some(imports::BindInterpreter::new(bytes, &command));
                 },
                 load_command::CommandVariant::Unixthread(command) => {
-                    entry = command.thread_state.eip as u64;
+                    // dyld cares only about the first LC_UNIXTHREAD
+                    if unixthread_entry_address.is_none() {
+                        unixthread_entry_address = Some(command.instruction_pointer(header.cputype)?);
+                    }
                 },
                 load_command::CommandVariant::Main(command) => {
-                    entry = command.entryoff;
+                    // dyld cares only about the first LC_MAIN
+                    if main_entry_offset.is_none() {
+                        main_entry_offset = Some(command.entryoff);
+                    }
                 },
                 load_command::CommandVariant::IdDylib(command) => {
                     let id = bytes.pread::<&str>(cmd.offset + command.dylib.name as usize)?;
@@ -108,6 +175,26 @@ impl<'a> MachO<'a> {
             }
             cmds.push(cmd)
         }
+
+        // dyld prefers LC_MAIN over LC_UNIXTHREAD
+        // choose the same way here
+        let (entry, old_style_entry) = if let Some(offset) = main_entry_offset {
+            // map the entrypoint offset to a virtual memory address
+            let base_address = segments.iter()
+                .filter(|s| &s.segname[0..7] == b"__TEXT\0")
+                .map(|s| s.vmaddr - s.fileoff)
+                .next()
+                .ok_or_else(||
+                    error::Error::Malformed(format!("image specifies LC_MAIN offset {} but has no __TEXT segment", offset))
+                )?;
+
+            (base_address + offset, false)
+        } else if let Some(address) = unixthread_entry_address {
+            (address, true)
+        } else {
+            (0, false)
+        };
+
         Ok(MachO {
             header: header,
             load_commands: cmds,
@@ -117,8 +204,12 @@ impl<'a> MachO<'a> {
             export_trie: export_trie,
             bind_interpreter: bind_interpreter,
             entry: entry,
+            old_style_entry: old_style_entry,
             name: name,
             ctx: ctx,
+            is_64: is_64,
+            little_endian: little_endian,
+            data: bytes,
         })
     }
 }
@@ -140,24 +231,53 @@ pub struct FatArchIterator<'a> {
 }
 
 impl<'a> Iterator for FatArchIterator<'a> {
-    type Item = scroll::Result<fat::FatArch>;
+    type Item = error::Result<fat::FatArch>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.index >= self.narches {
             None
         } else {
             let offset = (self.index * fat::SIZEOF_FAT_ARCH) + self.start;
-            let arch = self.data.pread_with::<fat::FatArch>(offset, scroll::BE);
+            let arch = self.data.pread_with::<fat::FatArch>(offset, scroll::BE).map_err(|e| e.into());
             self.index += 1;
             Some(arch)
         }
     }
 }
 
+/// Iterator over every `MachO` binary contained in this `MultiArch` container
+pub struct MachOIterator<'a> {
+    index: usize,
+    data: &'a[u8],
+    narches: usize,
+    start: usize,
+}
+
+impl<'a> Iterator for MachOIterator<'a> {
+    type Item = error::Result<MachO<'a>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.narches {
+            None
+        } else {
+            let index = self.index;
+            let offset = (index * fat::SIZEOF_FAT_ARCH) + self.start;
+            self.index += 1;
+            match self.data.pread_with::<fat::FatArch>(offset, scroll::BE) {
+                Ok(arch) => {
+                    let bytes = arch.slice(self.data);
+                    let binary = MachO::parse(bytes, 0);
+                    Some(binary)
+                },
+                Err(e) => Some(Err(e.into()))
+            }
+        }
+    }
+}
+
 impl<'a, 'b> IntoIterator for &'b MultiArch<'a> {
-    type Item = scroll::Result<fat::FatArch>;
-    type IntoIter = FatArchIterator<'a>;
+    type Item = error::Result<MachO<'a>>;
+    type IntoIter = MachOIterator<'a>;
     fn into_iter(self) -> Self::IntoIter {
-        FatArchIterator {
+        MachOIterator {
             index: 0,
             data: self.data,
             narches: self.narches,
@@ -177,16 +297,25 @@ impl<'a> MultiArch<'a> {
             narches: header.nfat_arch as usize
         })
     }
+    /// Iterate every fat arch header
+    pub fn iter_arches(&self) -> FatArchIterator {
+        FatArchIterator {
+            index: 0,
+            data: self.data,
+            narches: self.narches,
+            start: self.start,
+        }
+    }
     /// Return all the architectures in this binary
     pub fn arches(&self) -> error::Result<Vec<fat::FatArch>> {
         let mut arches = Vec::with_capacity(self.narches);
-        for arch in self.into_iter() {
+        for arch in self.iter_arches() {
             arches.push(arch?);
         }
         Ok(arches)
     }
     /// Try to get the Mach-o binary at `index`
-    pub fn get(&self, index: usize) -> error::Result<MachO> {
+    pub fn get(&self, index: usize) -> error::Result<MachO<'a>> {
         if index >= self.narches {
             return Err(error::Error::Malformed(format!("Requested the {}-th binary, but there are only {} architectures in this container", index, self.narches).into()))
         }
@@ -196,9 +325,17 @@ impl<'a> MultiArch<'a> {
         Ok(MachO::parse(bytes, 0)?)
     }
 
+    pub fn find<F: Fn(error::Result<fat::FatArch>) -> bool>(&'a self, f: F) -> Option<error::Result<MachO<'a>>> {
+        for (i, arch) in self.iter_arches().enumerate() {
+            if f(arch) {
+                return Some(self.get(i));
+            }
+        }
+        None
+    }
     /// Try and find the `cputype` in `Self`, if there is one
     pub fn find_cputype(&self, cputype: u32) -> error::Result<Option<fat::FatArch>> {
-        for arch in self.into_iter() {
+        for arch in self.iter_arches() {
             let arch = arch?;
             if arch.cputype == cputype { return Ok(Some(arch)) }
         }
@@ -219,11 +356,14 @@ impl<'a> fmt::Debug for MultiArch<'a> {
 #[derive(Debug)]
 /// Either a collection of multiple architectures, or a single mach-o binary
 pub enum Mach<'a> {
+    /// A "fat" multi-architecture binary container
     Fat(MultiArch<'a>),
+    /// A regular Mach-o binary
     Binary(MachO<'a>)
 }
 
 impl<'a> Mach<'a> {
+    /// Parse from `bytes` either a multi-arch binary or a regular mach-o binary
     pub fn parse(bytes: &'a [u8]) -> error::Result<Self> {
         let size = bytes.len();
         if size < 4 {
@@ -241,31 +381,6 @@ impl<'a> Mach<'a> {
             _ => {
                 let binary = MachO::parse(bytes, 0)?;
                 Ok(Mach::Binary(binary))
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn mach_fat_header() {
-        let bytes = [0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x5e, 0xe0, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x70, 0x00, 0x00, 0x00, 0x5c, 0xf0, 0x00, 0x00, 0x00, 0x0c];
-        let mach = Mach::parse(&bytes[..]).unwrap();
-        match mach {
-            Mach::Fat(multi) => {
-                println!("multi: {:?}", multi);
-                assert_eq!(multi.narches, 2);
-                let arches = multi.arches().unwrap();
-                println!("arches: {:?}", arches);
-                assert_eq!(arches[0].is_64(), true);
-                assert_eq!(arches[1].is_64(), false);
-                assert_eq!(arches.get(2).is_none(), true);
-            },
-            _ => {
-                println!("got mach binary from fat");
-                assert!(false);
             }
         }
     }

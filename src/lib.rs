@@ -25,7 +25,7 @@
 //! # Example
 //!
 //! ```rust
-//! use goblin::{error, Hint, pe, elf, mach, archive};
+//! use goblin::{error, Object};
 //! use std::path::Path;
 //! use std::env;
 //! use std::fs::File;
@@ -36,27 +36,22 @@
 //!         if i == 1 {
 //!             let path = Path::new(arg.as_str());
 //!             let mut fd = File::open(path)?;
-//!             let peek = goblin::peek(&mut fd)?;
 //!             let mut buffer = Vec::new();
 //!             fd.read_to_end(&mut buffer)?;
-//!             match peek {
-//!                 Hint::Elf(_) => {
-//!                     let elf = elf::Elf::parse(&buffer)?;
+//!             match Object::parse(&buffer)? {
+//!                 Object::Elf(elf) => {
 //!                     println!("elf: {:#?}", &elf);
 //!                 },
-//!                 Hint::PE => {
-//!                     let pe = pe::PE::parse(&buffer)?;
+//!                 Object::PE(pe) => {
 //!                     println!("pe: {:#?}", &pe);
 //!                 },
-//!                 Hint::Mach(_) => {
-//!                     let mach = mach::Mach::parse(&buffer)?;
+//!                 Object::Mach(mach) => {
 //!                     println!("mach: {:#?}", &mach);
 //!                 },
-//!                 Hint::Archive => {
-//!                     let archive = archive::Archive::parse(&buffer)?;
+//!                 Object::Archive(archive) => {
 //!                     println!("archive: {:#?}", &archive);
 //!                 },
-//!                 _ => {}
+//!                 Object::Unknown(magic) => { println!("unknown magic: {:#x}", magic) }
 //!             }
 //!         }
 //!     }
@@ -86,13 +81,14 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate plain;
+#[cfg_attr(feature = "std", macro_use)]
 extern crate scroll;
+
+#[cfg_attr(feature = "std", macro_use)]
+#[cfg(feature = "std")] extern crate log;
 
 #[cfg(feature = "std")]
 extern crate core;
-
-#[cfg(feature = "std")]
-#[macro_use] extern crate scroll_derive;
 
 #[cfg(feature = "std")]
 pub mod error;
@@ -103,19 +99,38 @@ pub mod strtab;
 // Misc/Helper Modules
 /////////////////////////
 
+macro_rules! if_std {
+    ($($i:item)*) => ($(
+        #[cfg(feature = "std")]
+        $i
+    )*)
+}
+
 /// Binary container size information and byte-order context
 pub mod container {
     use scroll;
+    pub use scroll::Endian as Endian;
+
     #[derive(Debug, Copy, Clone, PartialEq)]
+    /// The size of a binary container
     pub enum Container {
         Little,
         Big,
     }
 
+    impl Container {
+        /// Is this a 64-bit container or not?
+        pub fn is_big(&self) -> bool {
+            *self == Container::Big
+        }
+    }
+
     #[cfg(not(target_pointer_width = "64"))]
+    /// The default binary container size - either `Big` or `Little`, depending on whether the host machine's pointer size is 64 or not
     pub const CONTAINER: Container =  Container::Little;
 
     #[cfg(target_pointer_width = "64")]
+    /// The default binary container size - either `Big` or `Little`, depending on whether the host machine's pointer size is 64 or not
     pub const CONTAINER: Container =  Container::Big;
 
     impl Default for Container {
@@ -126,15 +141,26 @@ pub mod container {
     }
 
     #[derive(Debug, Copy, Clone, PartialEq)]
+    /// A binary parsing context, including the container size and underlying byte endianness
     pub struct Ctx {
         pub container: Container,
         pub le: scroll::Endian,
     }
 
     impl Ctx {
+        /// Whether this binary container context is "big" or not
+        pub fn is_big(&self) -> bool {
+            self.container.is_big()
+        }
+        /// Whether this binary container context is little endian or not
+        pub fn is_little_endian(&self) -> bool {
+            self.le.is_little()
+        }
+        /// Create a new binary container context
         pub fn new (container: Container, le: scroll::Endian) -> Self {
             Ctx { container: container, le: le }
         }
+        /// Return a dubious pointer/address byte size for the container
         pub fn size(&self) -> usize {
             match self.container {
                 // TODO: require pointer size initialization/setting or default to container size with these values, e.g., avr pointer width will be smaller iirc
@@ -164,11 +190,7 @@ pub mod container {
     }
 }
 
-#[cfg(feature = "std")]
-pub use peek::*;
-
-#[cfg(all(feature = "std"))]
-mod peek {
+if_std! {
 
     #[derive(Debug, Default)]
     /// Information obtained from a peek `Hint`
@@ -190,9 +212,8 @@ mod peek {
 
     /// Peeks at `bytes`, and returns a `Hint`
     #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
-    pub fn peek_bytes(bytes: &[u8; 16]) -> super::error::Result<Hint> {
+    pub fn peek_bytes(bytes: &[u8; 16]) -> error::Result<Hint> {
         use scroll::{Pread, BE};
-        use super::*;
         if &bytes[0..elf::header::SELFMAG] == elf::header::ELFMAG {
             let class = bytes[elf::header::EI_CLASS];
             let is_lsb = bytes[elf::header::EI_DATA] == elf::header::ELFDATA2LSB;
@@ -210,7 +231,7 @@ mod peek {
             Ok(Hint::PE)
         } else {
             use mach::{fat, header};
-            let magic = mach::peek(&bytes, 0)?;
+            let magic = mach::peek(bytes, 0)?;
             match magic {
                 fat::FAT_MAGIC => {
                     // should probably verify this is always Big Endian...
@@ -230,7 +251,7 @@ mod peek {
 
     /// Peeks at the underlying Read object. Requires the underlying bytes to have at least 16 byte length. Resets the seek to `Start` after reading.
     #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
-    pub fn peek<R: ::std::io::Read + ::std::io::Seek>(fd: &mut R) -> super::error::Result<Hint> {
+    pub fn peek<R: ::std::io::Read + ::std::io::Seek>(fd: &mut R) -> error::Result<Hint> {
         use std::io::SeekFrom;
         let mut bytes = [0u8; 16];
         fd.seek(SeekFrom::Start(0))?;
@@ -242,23 +263,32 @@ mod peek {
 
 #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
 #[derive(Debug)]
+/// A parseable object that goblin understands
 pub enum Object<'a> {
+    /// An ELF32/ELF64!
     Elf(elf::Elf<'a>),
+    /// A PE32/PE32+!
     PE(pe::PE<'a>),
+    /// A 32/64-bit Mach-o binary _OR_ it is a multi-architecture binary container!
     Mach(mach::Mach<'a>),
+    /// A Unix archive
     Archive(archive::Archive<'a>),
-    Unknown,
+    /// None of the above, with the given magic value
+    Unknown(u64),
 }
 
 #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
-pub fn parse(bytes: &[u8]) -> error::Result<Object> {
-    use std::io::Cursor;
-    match peek(&mut Cursor::new(&bytes))? {
-        Hint::Elf(_) => Ok(Object::Elf(elf::Elf::parse(bytes)?)),
-        Hint::Mach(_) | Hint::MachFat(_) => Ok(Object::Mach(mach::Mach::parse(bytes)?)),
-        Hint::Archive => Ok(Object::Archive(archive::Archive::parse(bytes)?)),
-        Hint::PE => Ok(Object::PE(pe::PE::parse(bytes)?)),
-        _ => Ok(Object::Unknown)
+impl<'a> Object<'a> {
+    /// Tries to parse an `Object` from `bytes`
+    pub fn parse(bytes: &[u8]) -> error::Result<Object> {
+        use std::io::Cursor;
+        match peek(&mut Cursor::new(&bytes))? {
+            Hint::Elf(_) => Ok(Object::Elf(elf::Elf::parse(bytes)?)),
+            Hint::Mach(_) | Hint::MachFat(_) => Ok(Object::Mach(mach::Mach::parse(bytes)?)),
+            Hint::Archive => Ok(Object::Archive(archive::Archive::parse(bytes)?)),
+            Hint::PE => Ok(Object::PE(pe::PE::parse(bytes)?)),
+            Hint::Unknown(magic) => Ok(Object::Unknown(magic))
+        }
     }
 }
 
@@ -279,11 +309,8 @@ pub mod elf32 {
     pub use elf::dyn::dyn32 as dyn;
     pub use elf::sym::sym32 as sym;
     pub use elf::reloc::reloc32 as reloc;
+    pub use elf::note::Nhdr32 as Note;
 
-    #[cfg(feature = "std")]
-    pub use strtab;
-
-    #[cfg(feature = "std")]
     pub mod gnu_hash {
         elf_gnu_hash_impl!(u32);
     }
@@ -298,21 +325,18 @@ pub mod elf64 {
     pub use elf::dyn::dyn64 as dyn;
     pub use elf::sym::sym64 as sym;
     pub use elf::reloc::reloc64 as reloc;
+    pub use elf::note::Nhdr64 as Note;
 
-    #[cfg(feature = "std")]
-    pub use strtab;
-
-    #[cfg(feature = "std")]
     pub mod gnu_hash {
         elf_gnu_hash_impl!(u64);
     }
 }
 
-#[cfg(feature = "mach64")]
+#[cfg(all(feature = "mach32", feature = "mach64", feature = "endian_fd"))]
 pub mod mach;
+
+#[cfg(all(feature = "pe32", feature = "pe64", feature = "endian_fd"))]
+pub mod pe;
 
 #[cfg(all(feature = "archive", feature = "std"))]
 pub mod archive;
-
-#[cfg(all(feature = "pe32", feature = "std"))]
-pub mod pe;

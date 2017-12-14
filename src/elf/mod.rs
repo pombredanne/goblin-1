@@ -36,15 +36,6 @@
 //! To use the automagic ELF datatype union parser, you _must_ enable/opt-in to the  `elf64`, `elf32`, and
 //! `endian_fd` features if you disable `default`.
 
-#[cfg(feature = "std")]
-pub use super::error;
-
-#[cfg(feature = "std")]
-pub use super::container;
-
-#[cfg(feature = "std")]
-pub use super::strtab;
-
 #[macro_use]
 mod gnu_hash;
 
@@ -59,22 +50,26 @@ pub mod sym;
 pub mod dyn;
 #[macro_use]
 pub mod reloc;
+pub mod note;
 
-#[cfg(all(feature = "std", feature = "elf32", feature = "elf64", feature = "endian_fd"))]
-pub use self::impure::*;
 
-#[cfg(all(feature = "std", feature = "elf32", feature = "elf64", feature = "endian_fd"))]
-#[macro_use]
-mod impure {
+macro_rules! if_sylvan {
+    ($($i:item)*) => ($(
+        #[cfg(all(feature = "std", feature = "elf32", feature = "elf64", feature = "endian_fd"))]
+        $i
+    )*)
+}
+
+if_sylvan! {
     use scroll::{self, ctx, Pread, Endian};
-    use super::{header, program_header, section_header, sym, dyn, reloc};
-    use super::strtab::Strtab;
-    use super::error;
-    use super::container::{Container, Ctx};
+    use strtab::Strtab;
+    use error;
+    use container::{Container, Ctx};
 
     pub type Header = header::Header;
     pub type ProgramHeader = program_header::ProgramHeader;
     pub type SectionHeader = section_header::SectionHeader;
+    pub type Symtab<'a> = sym::Symtab<'a>;
     pub type Sym = sym::Sym;
     pub type Dyn = dyn::Dyn;
     pub type Dynamic = dyn::Dynamic;
@@ -82,7 +77,6 @@ mod impure {
 
     pub type ProgramHeaders = Vec<ProgramHeader>;
     pub type SectionHeaders = Vec<SectionHeader>;
-    pub type Syms = Vec<Sym>;
     pub type ShdrIdx = usize;
 
     #[derive(Debug)]
@@ -103,10 +97,10 @@ mod impure {
         /// The dynamically accessible symbols, i.e., exports, imports.
         /// This is what the dynamic linker uses to dynamically load and link your binary,
         /// or find imported symbols for binaries which dynamically link against your library
-        pub dynsyms: Syms,
-        /// The debugging symbol array
-        pub syms: Syms,
-        /// The string table for the symbol array
+        pub dynsyms: Symtab<'a>,
+        /// The debugging symbol table
+        pub syms: Symtab<'a>,
+        /// The string table for the symbol table
         pub strtab: Strtab<'a>,
         /// Contains dynamic linking information, with the _DYNAMIC array + a preprocessed DynamicInfo for that array
         pub dynamic: Option<Dynamic>,
@@ -119,11 +113,11 @@ mod impure {
         /// Section relocations by section index (only present if this is a relocatable object file)
         pub shdr_relocs: Vec<(ShdrIdx, Vec<Reloc>)>,
         /// The binary's soname, if it has one
-        pub soname: Option<String>,
+        pub soname: Option<&'a str>,
         /// The binary's program interpreter (e.g., dynamic linker), if it has one
         pub interpreter: Option<&'a str>,
         /// A list of this binary's dynamic libraries it uses, if there are any
-        pub libraries: Vec<String>,
+        pub libraries: Vec<&'a str>,
         pub is_64: bool,
         /// Whether this is a shared object or not
         pub is_lib: bool,
@@ -133,9 +127,31 @@ mod impure {
         pub bias: u64,
         /// Whether the binary is little endian or not
         pub little_endian: bool,
+        ctx: Ctx,
     }
 
     impl<'a> Elf<'a> {
+        /// Try to iterate the notes; returns `None` if there aren't any notes in this binary
+        pub fn iter_notes(&self, data: &'a [u8]) -> Option<note::NoteIterator<'a>> {
+            for phdr in &self.program_headers {
+                if phdr.p_type == program_header::PT_NOTE {
+                    let offset = phdr.p_offset as usize;
+                    let alignment = phdr.p_align as usize;
+                    return Some(
+                        note::NoteIterator {
+                            data,
+                            offset,
+                            size: offset + phdr.p_filesz as usize,
+                            ctx: (alignment, self.ctx)
+                        }
+                    )
+                }
+            }
+            None
+        }
+        pub fn is_object_file(&self) -> bool {
+            self.header.e_type == header::ET_REL
+        }
         /// Parses the contents of the byte stream in `bytes`, and maybe returns a unified binary
         pub fn parse(bytes: &'a [u8]) -> error::Result<Self> {
             let header = bytes.pread::<Header>(0)?;
@@ -181,35 +197,40 @@ mod impure {
                 if ph.p_type == program_header::PT_INTERP && ph.p_filesz != 0 {
                     let count = (ph.p_filesz - 1) as usize;
                     let offset = ph.p_offset as usize;
-                    interpreter = Some(bytes.pread_slice::<str>(offset, count)?);
+                    interpreter = Some(bytes.pread_with::<&str>(offset, ::scroll::ctx::StrCtx::Length(count))?);
                 }
             }
 
             let section_headers = SectionHeader::parse(bytes, header.e_shoff as usize, header.e_shnum as usize, ctx)?;
 
-            let strtab_idx = header.e_shstrndx as usize;
-            let shdr_strtab = if strtab_idx >= section_headers.len() {
-                Strtab::default()
-            } else {
-                let shdr = &section_headers[strtab_idx];
-                try!(Strtab::parse(bytes, shdr.sh_offset as usize, shdr.sh_size as usize, 0x0))
+            let get_strtab = |section_headers: &[SectionHeader], section_idx: usize| {
+                if section_idx >= section_headers.len() {
+                    // FIXME: warn! here
+                    Ok(Strtab::default())
+                } else {
+                    let shdr = &section_headers[section_idx];
+                    shdr.check_size(bytes.len())?;
+                    Strtab::parse(bytes, shdr.sh_offset as usize, shdr.sh_size as usize, 0x0)
+                }
             };
 
-            let mut syms = vec![];
+            let strtab_idx = header.e_shstrndx as usize;
+            let shdr_strtab = get_strtab(&section_headers, strtab_idx)?;
+
+            let mut syms = Symtab::default();
             let mut strtab = Strtab::default();
             for shdr in &section_headers {
                 if shdr.sh_type as u32 == section_header::SHT_SYMTAB {
                     let size = shdr.sh_entsize;
                     let count = if size == 0 { 0 } else { shdr.sh_size / size };
-                    syms = Sym::parse(bytes, shdr.sh_offset as usize, count as usize, ctx)?;
-                    let shdr = &section_headers[shdr.sh_link as usize];
-                    strtab = Strtab::parse(bytes, shdr.sh_offset as usize, shdr.sh_size as usize, 0x0)?;
+                    syms = Symtab::parse(bytes, shdr.sh_offset as usize, count as usize, ctx)?;
+                    strtab = get_strtab(&section_headers, shdr.sh_link as usize)?;
                 }
             }
 
             let mut soname = None;
             let mut libraries = vec![];
-            let mut dynsyms = vec![];
+            let mut dynsyms = Symtab::default();
             let mut dynrelas = vec![];
             let mut dynrels = vec![];
             let mut pltrelocs = vec![];
@@ -223,13 +244,14 @@ mod impure {
                                           0x0)?;
 
                 if dyn_info.soname != 0 {
-                    soname = Some(dynstrtab.get(dyn_info.soname).to_owned())
+                    // FIXME: warn! here
+                    soname = match dynstrtab.get(dyn_info.soname) { Some(Ok(soname)) => Some(soname), _ => None };
                 }
                 if dyn_info.needed_count > 0 {
                     libraries = dynamic.get_libraries(&dynstrtab);
                 }
                 let num_syms = if dyn_info.syment == 0 { 0 } else { if dyn_info.strtab <= dyn_info.symtab { 0 } else { (dyn_info.strtab - dyn_info.symtab) / dyn_info.syment }};
-                dynsyms = Sym::parse(bytes, dyn_info.symtab, num_syms, ctx)?;
+                dynsyms = Symtab::parse(bytes, dyn_info.symtab, num_syms, ctx)?;
                 // parse the dynamic relocations
                 dynrelas = Reloc::parse(bytes, dyn_info.rela, dyn_info.relasz, true, ctx)?;
                 dynrels = Reloc::parse(bytes, dyn_info.rel, dyn_info.relsz, false, ctx)?;
@@ -243,10 +265,12 @@ mod impure {
                 if header.e_type == header::ET_REL {
                     for (idx, section) in section_headers.iter().enumerate() {
                         if section.sh_type == section_header::SHT_REL {
+                            section.check_size(bytes.len())?;
                             let sh_relocs = Reloc::parse(bytes, section.sh_offset as usize, section.sh_size as usize, false, ctx)?;
                             relocs.push((idx, sh_relocs));
                         }
                         if section.sh_type == section_header::SHT_RELA {
+                            section.check_size(bytes.len())?;
                             let sh_relocs = Reloc::parse(bytes, section.sh_offset as usize, section.sh_size as usize, true, ctx)?;
                             relocs.push((idx, sh_relocs));
                         }
@@ -276,14 +300,17 @@ mod impure {
                 entry: entry as u64,
                 bias: bias as u64,
                 little_endian: is_lsb,
+                ctx,
             })
         }
     }
 
     impl<'a> ctx::TryFromCtx<'a, (usize, Endian)> for Elf<'a> {
-        type Error = error::Error;
-        fn try_from_ctx(src: &'a [u8], (_, _): (usize, Endian)) -> Result<Elf<'a>, Self::Error> {
-            Elf::parse(src)
+        type Error = ::error::Error;
+        type Size = usize;
+        fn try_from_ctx(src: &'a [u8], (_, _): (usize, Endian)) -> Result<(Elf<'a>, Self::Size), Self::Error> {
+            let elf = Elf::parse(src)?;
+            Ok((elf, src.len()))
         }
     }
 }
@@ -292,19 +319,18 @@ mod impure {
 mod tests {
     use super::*;
 
-    use scroll;
-
     #[test]
     fn parse_crt1_64bit() {
         let crt1: Vec<u8> = include!("../../etc/crt1.rs");
-        let bytes = scroll::Buffer::new(crt1);
-        match Elf::parse(&bytes) {
+        match Elf::parse(&crt1) {
             Ok (binary) => {
                 assert!(binary.is_64);
                 assert!(!binary.is_lib);
                 assert_eq!(binary.entry, 0);
                 assert_eq!(binary.bias, 0);
-                let syms = binary.syms;
+                assert!(binary.syms.get(1000).is_none());
+                assert!(binary.syms.get(5).is_some());
+                let syms = binary.syms.to_vec();
                 let mut i = 0;
                 assert!(binary.section_headers.len() != 0);
                 for sym in &syms {
@@ -328,14 +354,15 @@ mod tests {
     #[test]
     fn parse_crt1_32bit() {
         let crt1: Vec<u8> = include!("../../etc/crt132.rs");
-        let bytes = scroll::Buffer::new(crt1);
-        match Elf::parse(&bytes) {
+        match Elf::parse(&crt1) {
             Ok (binary) => {
                 assert!(!binary.is_64);
                 assert!(!binary.is_lib);
                 assert_eq!(binary.entry, 0);
                 assert_eq!(binary.bias, 0);
-                let syms = binary.syms;
+                assert!(binary.syms.get(1000).is_none());
+                assert!(binary.syms.get(5).is_some());
+                let syms = binary.syms.to_vec();
                 let mut i = 0;
                 assert!(binary.section_headers.len() != 0);
                 for sym in &syms {
