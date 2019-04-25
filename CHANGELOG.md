@@ -5,9 +5,84 @@ Before 1.0, this project does not adhere to [Semantic Versioning](http://semver.
 
 I'm sorry, I will try my best to ease breaking changes.  We're almost to 1.0, don't worry!
 
-## [Unreleased]
-### Changed
+## [0.0.22] - 2019-4-13
 ### Added
+- Beautify debugging by using `debug_struct` in `Debug` implementation of many structs.
+- PE: fix rva mask, thanks @wickawacka: https://github.com/m4b/goblin/pull/152
+- PE: add PE exception tables, thanks @jan-auer: https://github.com/m4b/goblin/pull/136
+
+### Changed
+- Bump lowest Rust version to 1.31.1 and transition project to Rust 2018 edition.
+- BREAKING: Rename module `goblin::elf::dyn` to `goblin::elf::dynamic` due to `dyn`
+  become a keyword in Rust 2018 edition.
+- BREAKING: Rename `mach::exports::SymbolKind::to_str(kind: SymbolKind)` -> `to_str(&self)`.
+- BREAKING: Rename `strtab::Strtab::to_vec(self)` -> `to_vec(&self).`
+
+### Removed
+- BREAKING: `goblin::error::Error::description` would be removed. Use `to_string()` method instead.
+
+### Fixed
+- elf: handle some invalid sizes, thanks @philipc: https://github.com/m4b/goblin/pull/121
+
+## [0.0.21] - 2019-2-21
+### Added
+- elf: add symbol visibility. thanks @pchickey: https://github.com/m4b/goblin/pull/119
+
+## [0.0.20] - 2019-2-10
+### Added
+- elf: parse section header relocs even when not an object file. thanks @Techno-Coder: https://github.com/m4b/goblin/pull/118
+- pe: make utils public, add better examples for data directory usage. thanks @Pzixel: https://github.com/m4b/goblin/pull/116
+
+## [0.0.19] - 2018-10-23
+### Added
+- elf: fix regression when parsing dynamic symbols from some binaries, thanks @philipc: https://github.com/m4b/goblin/issues/111
+
+## [0.0.18] - 2018-10-14
+### Changed
+ - BREAKING: updated required compiler to 1.20 (due to scroll 1.20 requirement)
+ - BREAKING: elf: removed bias field, as it was misleading/useless/incorrect
+ - BREAKING: elf: add lazy relocation iterators: Thanks @ibabushkin https://github.com/m4b/goblin/pull/102
+ - BREAKING: mach: remove repr(packed) from dylib and fvmlib (this should not affect anyone): https://github.com/m4b/goblin/issues/105
+### Added
+ - elf: use gnu/sysv hash table to compute sizeof dynsyms more accurately: again _huge_ thanks to @philipc https://github.com/m4b/goblin/pull/109
+ - elf: handle multiple load biases: _huge_ thanks @philipc: https://github.com/m4b/goblin/pull/107
+ - mach: add arm64e constants: Thanks @mitsuhiko https://github.com/m4b/goblin/pull/103
+ - PE: calculate read bytes using alignment: Thanks @tathanhdinh https://github.com/m4b/goblin/pull/101
+ - PE: get proper names for PE sections: Thanks @roblabla https://github.com/m4b/goblin/pull/100
+
+## [0.0.17] - 2018-7-16
+### Changed
+ - BREAKING: updated required compiler to 1.19 (technically only required for tests, but assume this is required for building as well)
+ - fixed nightly alloc api issues: https://github.com/m4b/goblin/issues/94
+
+## [0.0.16] - 2018-7-14
+### Changed
+ - BREAKING: pe.export: name is now optional to reflect realities of PE parsing, and add more robustness to parser. many thanks to @tathanhdinh! https://github.com/m4b/goblin/pull/88
+ - elf.note: treat alignment similar to other tools, e.g., readelf. Thanks @xcoldhandsx: https://github.com/m4b/goblin/pull/91
+### Added
+ - elf: more inline annotations on various methods, thanks@amanieu: https://github.com/m4b/goblin/pull/87
+
+## [0.0.15] - 2018-4-22
+### Changed
+ - BREAKING: elf.reloc: u64/i64 used for r_offset/r_addend, and addend is now proper optional, thanks @amanieu! https://github.com/m4b/goblin/pull/86/
+ - update to scroll 0.9
+ - pe32+: parse better, thanks @kjempelodott, https://github.com/m4b/goblin/pull/82
+### Added
+ - mach: add constants for `n_types` when `N_STAB` field is being used, thanks @jrmuizel! https://github.com/m4b/goblin/pull/85
+ - elf: implement support for compressed headers, thanks @rocallahan! https://github.com/m4b/goblin/pull/83
+ - new nightly "alloc" feature: allows compiling the goblin parser on nightly with extern crate + no_std, thanks @philipc! https://github.com/m4b/goblin/pull/77
+ - mach.segments: do not panic on bad internal data bounds: https://github.com/m4b/goblin/issues/74
+ - mach: correctly add weak dylibs to import libs: https://github.com/m4b/goblin/issues/73
+
+## [0.0.14] - 2018-1-15
+### Changed
+- BREAKING: elf: `iter_notes` renamed to `iter_note_headers`
+- BREAKING: mach: remove `is_little_endian()`, `ctx()`, and `container()` methods from header, as they were completely invalid for big-endian architectures since the header was parsed according to the endianness of the binary correctly into memory, and hence would always report `MH_MAGIC` or `MH_MAGIC64` as the magic value.
+- elf: courtesy of @jan-auer, note iterator now properly iterates over multiple PH_NOTEs
+### Added
+- mach: added hotly requested feature - goblin now has new functionality to parse big-endian, powerpc 32-bit mach-o binaries correctly
+- mach: new function to correctly extract the parsing context for a mach-o binary, `parse_magic_and_ctx`
+- elf: note iterator has new `iter_note_sections` method
 
 ## [0.0.13] - 2017-12-10
 ### Changed

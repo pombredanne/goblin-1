@@ -1,8 +1,9 @@
 //! Load commands tell the kernel and dynamic linker anything from how to load this binary into memory, what the entry point is, apple specific information, to which libraries it requires for dynamic linking
 
-use error;
-use std::fmt::{self, Display};
-use scroll::{self, ctx, Endian, Pread};
+use crate::error;
+use core::fmt::{self, Display};
+use scroll::{ctx, Endian};
+use scroll::{Pread, Pwrite, IOread, IOwrite, SizeWith};
 
 ///////////////////////////////////////
 // Load Commands from mach-o/loader.h
@@ -141,7 +142,7 @@ impl SegmentCommand64 {
 /// target pathname (the name of the library as found for execution), and the
 /// minor version number.  The address of where the headers are loaded is in
 /// header_addr. (THIS IS OBSOLETE and no longer supported).
-#[repr(packed)]
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct Fvmlib {
     /// library's target pathname
@@ -191,7 +192,7 @@ pub const SIZEOF_FVMLIB_COMMAND: usize = 20;
 /// An object that uses a dynamically linked shared library also contains a
 /// dylib_command (cmd == LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, or
 /// LC_REEXPORT_DYLIB) for each library it uses.
-#[repr(packed)]
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct Dylib {
     /// library's path name
@@ -418,7 +419,7 @@ impl ThreadCommand {
                 //   uint32_t gs;
                 // }
                 let eip: u32 = self.thread_state[10];
-                Ok(eip as u64)
+                Ok(u64::from(eip))
             },
             super::cputype::CPU_TYPE_X86_64 => {
                 // struct x86_thread_state64_t {
@@ -445,8 +446,8 @@ impl ThreadCommand {
                 //   uint64_t gs;
                 // }
                 let rip: u64 =
-                       (self.thread_state[32] as u64)
-                    | ((self.thread_state[33] as u64) << 32);
+                       (u64::from(self.thread_state[32]))
+                    | ((u64::from(self.thread_state[33])) << 32);
                 Ok(rip)
             }
             super::cputype::CPU_TYPE_ARM => {
@@ -458,7 +459,7 @@ impl ThreadCommand {
                 //   uint32_t cpsr;
                 // }
                 let pc: u32 = self.thread_state[15];
-                Ok(pc as u64)
+                Ok(u64::from(pc))
             }
             super::cputype::CPU_TYPE_ARM64 => {
                 // struct arm_thread_state64_t {
@@ -471,10 +472,22 @@ impl ThreadCommand {
                 //   uint32_t pad;
                 // }
                 let pc: u64 =
-                       (self.thread_state[64] as u64)
-                    | ((self.thread_state[65] as u64) << 32);
+                       (u64::from(self.thread_state[64]))
+                    | ((u64::from(self.thread_state[65])) << 32);
                 Ok(pc)
             }
+            // https://github.com/m4b/goblin/issues/64
+            // Probably a G4
+            super::cputype::CPU_TYPE_POWERPC => {
+                Ok(u64::from(self.thread_state[0]))
+            },
+            // I think the G5 was the last motorola powerpc processor used by apple before switching to intel cpus.
+            // unfortunately I don't have any binaries on hand to see what its thread state looks like :/
+            // super::cputype::CPU_TYPE_POWERPC64 => {
+            // }
+            // Assuming above is added, I don't believe apple ever ported mach-o the mach kernel
+            // (and hence its binary format) to any other machines except the above,
+            // but I would be happy to learn otherwise
             _ => {
                 Err(error::Error::Malformed(format!("unable to find instruction pointer for cputype {:?}", cputype)))
             }
@@ -483,10 +496,9 @@ impl ThreadCommand {
 }
 
 impl<'a> ctx::TryFromCtx<'a, Endian> for ThreadCommand {
-    type Error = ::error::Error;
+    type Error = crate::error::Error;
     type Size = usize;
     fn try_from_ctx(bytes: &'a [u8], le: Endian) -> error::Result<(Self, Self::Size)> {
-        use scroll::{Pread};
         let lc = bytes.pread_with::<LoadCommandHeader>(0, le)?;
 
         // read the thread state flavor and length of the thread state
@@ -507,16 +519,16 @@ impl<'a> ctx::TryFromCtx<'a, Endian> for ThreadCommand {
 
         // read the thread state
         let mut thread_state: [u32; 70] = [ 0; 70 ];
-        for i in 0..count as usize {
-            thread_state[i] = thread_state_bytes.pread_with(i*4, le)?;
+        for (i, state) in thread_state.iter_mut().enumerate().take(count as usize) {
+            *state = thread_state_bytes.pread_with(i*4, le)?;
         }
 
         Ok((ThreadCommand{
             cmd: lc.cmd,
             cmdsize: lc.cmdsize,
-            flavor: flavor,
-            count: count,
-            thread_state: thread_state,
+            flavor,
+            count,
+            thread_state,
         }, lc.cmdsize as _))
     }
 }
@@ -527,7 +539,6 @@ impl Clone for ThreadCommand {
     }
 }
 
-#[cfg(feature = "std")]
 impl fmt::Debug for ThreadCommand {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("ThreadCommand")
@@ -596,8 +607,8 @@ pub struct SymtabCommand {
   pub strsize: u32,
 }
 
-impl SymtabCommand {
-    pub fn new() -> Self {
+impl Default for SymtabCommand {
+    fn default() -> Self {
         SymtabCommand {
             cmd: LC_SYMTAB,
             cmdsize: SIZEOF_SYMTAB_COMMAND as u32,
@@ -606,6 +617,12 @@ impl SymtabCommand {
             stroff: 0,
             strsize: 0,
         }
+    }
+}
+
+impl SymtabCommand {
+    pub fn new() -> Self {
+        Default::default()
     }
 }
 
@@ -692,8 +709,8 @@ pub struct DysymtabCommand {
     pub nlocrel:        u32,
 }
 
-impl DysymtabCommand {
-    pub fn new() -> Self {
+impl Default for DysymtabCommand {
+    fn default() -> Self {
         DysymtabCommand {
             cmd: LC_DYSYMTAB,
             cmdsize: SIZEOF_DYSYMTAB_COMMAND as u32,
@@ -716,6 +733,12 @@ impl DysymtabCommand {
             locreloff:      0,
             nlocrel:        0,
         }
+    }
+}
+
+impl DysymtabCommand {
+    pub fn new() -> Self {
+        Default::default()
     }
 }
 
@@ -1139,7 +1162,7 @@ pub struct DataInCodeEntry {
 // Constants, et. al
 ///////////////////////////////////////
 
-pub const LC_REQ_DYLD: u32 = 0x80000000;
+pub const LC_REQ_DYLD: u32 = 0x8000_0000;
 pub const LC_LOAD_WEAK_DYLIB: u32 = 0x18 | LC_REQ_DYLD;
 pub const LC_RPATH: u32 = 0x1c | LC_REQ_DYLD;
 pub const LC_REEXPORT_DYLIB: u32 = 0x1f | LC_REQ_DYLD;
@@ -1246,6 +1269,7 @@ pub fn cmd_to_str(cmd: u32) -> &'static str {
 ///////////////////////////////////////////
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 /// The various load commands as a cast-free variant/enum
 pub enum CommandVariant {
     Segment32              (SegmentCommand32),
@@ -1299,10 +1323,9 @@ pub enum CommandVariant {
 }
 
 impl<'a> ctx::TryFromCtx<'a, Endian> for CommandVariant {
-    type Error = ::error::Error;
+    type Error = crate::error::Error;
     type Size = usize;
     fn try_from_ctx(bytes: &'a [u8], le: Endian) -> error::Result<(Self, Self::Size)> {
-        use scroll::{Pread};
         use self::CommandVariant::*;
         let lc = bytes.pread_with::<LoadCommandHeader>(0, le)?;
         let size = lc.cmdsize as usize;
@@ -1356,7 +1379,7 @@ impl<'a> ctx::TryFromCtx<'a, Endian> for CommandVariant {
             LC_DYLIB_CODE_SIGN_DRS => {     let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((DylibCodeSignDrs       (comm), size))},
             LC_LINKER_OPTION => {           let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((LinkerOption           (comm), size))},
             LC_LINKER_OPTIMIZATION_HINT => {let comm = bytes.pread_with::<LinkeditDataCommand>    (0, le)?;  Ok((LinkerOptimizationHint (comm), size))},
-            _ =>                                                                                             Ok((Unimplemented          (lc.clone()), size)),
+            _ =>                                                                                             Ok((Unimplemented          (lc), size)),
         }
     }
 }
@@ -1487,6 +1510,6 @@ impl LoadCommand {
         let command = bytes.pread_with::<CommandVariant>(start, le)?;
         let size = command.cmdsize();
         *offset = start + size;
-        Ok(LoadCommand { offset: start, command: command })
+        Ok(LoadCommand { offset: start, command })
     }
 }

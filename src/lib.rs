@@ -10,7 +10,7 @@
 //! * A PE32/PE32+ (64-bit) parser, and raw C structs
 //! * A Unix archive parser and loader
 //!
-//! Goblin _should_ require at least `rustc` 1.16, but is developed on stable.
+//! Goblin requires at least `rustc` 1.31.1, uses the 2018 rust edition, and is developed on stable.
 //!
 //! Goblin primarily supports the following important use cases:
 //!
@@ -79,26 +79,29 @@
 //! via `endian_fd`
 
 #![cfg_attr(not(feature = "std"), no_std)]
-
-extern crate plain;
-#[cfg_attr(feature = "std", macro_use)]
-extern crate scroll;
-
-#[cfg_attr(feature = "std", macro_use)]
-#[cfg(feature = "std")] extern crate log;
+#![cfg_attr(all(feature = "alloc", not(feature = "std")), feature(alloc))]
 
 #[cfg(feature = "std")]
 extern crate core;
 
-#[cfg(feature = "std")]
-pub mod error;
+#[cfg(all(feature = "alloc", not(feature = "std")))]
+#[macro_use]
+extern crate alloc;
 
-pub mod strtab;
+#[cfg(feature = "std")]
+mod alloc {
+    pub use std::borrow;
+    pub use std::boxed;
+    pub use std::string;
+    pub use std::vec;
+    pub use std::collections;
+}
 
 /////////////////////////
 // Misc/Helper Modules
 /////////////////////////
 
+#[allow(unused)]
 macro_rules! if_std {
     ($($i:item)*) => ($(
         #[cfg(feature = "std")]
@@ -106,10 +109,23 @@ macro_rules! if_std {
     )*)
 }
 
+#[allow(unused)]
+macro_rules! if_alloc {
+    ($($i:item)*) => ($(
+        #[cfg(feature = "alloc")]
+        $i
+    )*)
+}
+
+#[cfg(feature = "alloc")]
+pub mod error;
+
+pub mod strtab;
+
 /// Binary container size information and byte-order context
 pub mod container {
     use scroll;
-    pub use scroll::Endian as Endian;
+    pub use scroll::Endian;
 
     #[derive(Debug, Copy, Clone, PartialEq)]
     /// The size of a binary container
@@ -120,8 +136,8 @@ pub mod container {
 
     impl Container {
         /// Is this a 64-bit container or not?
-        pub fn is_big(&self) -> bool {
-            *self == Container::Big
+        pub fn is_big(self) -> bool {
+            self == Container::Big
         }
     }
 
@@ -149,19 +165,19 @@ pub mod container {
 
     impl Ctx {
         /// Whether this binary container context is "big" or not
-        pub fn is_big(&self) -> bool {
+        pub fn is_big(self) -> bool {
             self.container.is_big()
         }
         /// Whether this binary container context is little endian or not
-        pub fn is_little_endian(&self) -> bool {
+        pub fn is_little_endian(self) -> bool {
             self.le.is_little()
         }
         /// Create a new binary container context
         pub fn new (container: Container, le: scroll::Endian) -> Self {
-            Ctx { container: container, le: le }
+            Ctx { container, le }
         }
         /// Return a dubious pointer/address byte size for the container
-        pub fn size(&self) -> usize {
+        pub fn size(self) -> usize {
             match self.container {
                 // TODO: require pointer size initialization/setting or default to container size with these values, e.g., avr pointer width will be smaller iirc
                 Container::Little => 4,
@@ -172,13 +188,13 @@ pub mod container {
 
     impl From<Container> for Ctx {
         fn from(container: Container) -> Self {
-            Ctx { container: container, le: scroll::Endian::default() }
+            Ctx { container, le: scroll::Endian::default() }
         }
     }
 
     impl From<scroll::Endian> for Ctx {
         fn from(le: scroll::Endian) -> Self {
-            Ctx { container: CONTAINER, le: le }
+            Ctx { container: CONTAINER, le }
         }
     }
 
@@ -190,7 +206,14 @@ pub mod container {
     }
 }
 
-if_std! {
+macro_rules! if_everything {
+    ($($i:item)*) => ($(
+        #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
+        $i
+    )*)
+}
+
+if_everything! {
 
     #[derive(Debug, Default)]
     /// Information obtained from a peek `Hint`
@@ -211,9 +234,9 @@ if_std! {
     }
 
     /// Peeks at `bytes`, and returns a `Hint`
-    #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
     pub fn peek_bytes(bytes: &[u8; 16]) -> error::Result<Hint> {
-        use scroll::{Pread, BE};
+        use scroll::{Pread, LE, BE};
+        use crate::mach::{fat, header};
         if &bytes[0..elf::header::SELFMAG] == elf::header::ELFMAG {
             let class = bytes[elf::header::EI_CLASS];
             let is_lsb = bytes[elf::header::EI_DATA] == elf::header::ELFDATA2LSB;
@@ -224,14 +247,13 @@ if_std! {
                     Some (false)
                 } else { None };
 
-            Ok(Hint::Elf(HintData { is_lsb: is_lsb, is_64: is_64 }))
+            Ok(Hint::Elf(HintData { is_lsb, is_64 }))
         } else if &bytes[0..archive::SIZEOF_MAGIC] == archive::MAGIC {
             Ok(Hint::Archive)
-        } else if (&bytes[0..2]).pread::<u16>(0)? == pe::header::DOS_MAGIC {
+        } else if (&bytes[0..2]).pread_with::<u16>(0, LE)? == pe::header::DOS_MAGIC {
             Ok(Hint::PE)
         } else {
-            use mach::{fat, header};
-            let magic = mach::peek(bytes, 0)?;
+            let (magic, maybe_ctx) = mach::parse_magic_and_ctx(bytes, 0)?;
             match magic {
                 fat::FAT_MAGIC => {
                     // should probably verify this is always Big Endian...
@@ -239,9 +261,11 @@ if_std! {
                     Ok(Hint::MachFat(narchitectures))
                 },
                 header::MH_CIGAM_64 | header::MH_CIGAM | header::MH_MAGIC_64 | header::MH_MAGIC => {
-                    let is_lsb = magic == header::MH_CIGAM || magic == header::MH_CIGAM_64;
-                    let is_64 = magic == header::MH_MAGIC_64 || magic == header::MH_CIGAM_64;
-                    Ok(Hint::Mach(HintData { is_lsb: is_lsb, is_64: Some(is_64) }))
+                    if let Some(ctx) = maybe_ctx {
+                        Ok(Hint::Mach(HintData { is_lsb: ctx.le.is_little(), is_64: Some(ctx.container.is_big()) }))
+                    } else {
+                        Err(error::Error::Malformed(format!("Correct mach magic {:#x} does not have a matching parsing context!", magic)))
+                    }
                 },
                 // its something else
                 _ => Ok(Hint::Unknown(bytes.pread::<u64>(0)?))
@@ -250,7 +274,7 @@ if_std! {
     }
 
     /// Peeks at the underlying Read object. Requires the underlying bytes to have at least 16 byte length. Resets the seek to `Start` after reading.
-    #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
+    #[cfg(feature = "std")]
     pub fn peek<R: ::std::io::Read + ::std::io::Seek>(fd: &mut R) -> error::Result<Hint> {
         use std::io::SeekFrom;
         let mut bytes = [0u8; 16];
@@ -259,38 +283,39 @@ if_std! {
         fd.seek(SeekFrom::Start(0))?;
         peek_bytes(&bytes)
     }
-}
 
-#[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
-#[derive(Debug)]
-/// A parseable object that goblin understands
-pub enum Object<'a> {
-    /// An ELF32/ELF64!
-    Elf(elf::Elf<'a>),
-    /// A PE32/PE32+!
-    PE(pe::PE<'a>),
-    /// A 32/64-bit Mach-o binary _OR_ it is a multi-architecture binary container!
-    Mach(mach::Mach<'a>),
-    /// A Unix archive
-    Archive(archive::Archive<'a>),
-    /// None of the above, with the given magic value
-    Unknown(u64),
-}
+    #[derive(Debug)]
+    #[allow(clippy::large_enum_variant)]
+    /// A parseable object that goblin understands
+    pub enum Object<'a> {
+        /// An ELF32/ELF64!
+        Elf(elf::Elf<'a>),
+        /// A PE32/PE32+!
+        PE(pe::PE<'a>),
+        /// A 32/64-bit Mach-o binary _OR_ it is a multi-architecture binary container!
+        Mach(mach::Mach<'a>),
+        /// A Unix archive
+        Archive(archive::Archive<'a>),
+        /// None of the above, with the given magic value
+        Unknown(u64),
+    }
 
-#[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
-impl<'a> Object<'a> {
-    /// Tries to parse an `Object` from `bytes`
-    pub fn parse(bytes: &[u8]) -> error::Result<Object> {
-        use std::io::Cursor;
-        match peek(&mut Cursor::new(&bytes))? {
-            Hint::Elf(_) => Ok(Object::Elf(elf::Elf::parse(bytes)?)),
-            Hint::Mach(_) | Hint::MachFat(_) => Ok(Object::Mach(mach::Mach::parse(bytes)?)),
-            Hint::Archive => Ok(Object::Archive(archive::Archive::parse(bytes)?)),
-            Hint::PE => Ok(Object::PE(pe::PE::parse(bytes)?)),
-            Hint::Unknown(magic) => Ok(Object::Unknown(magic))
+    // TODO: this could avoid std using peek_bytes
+    #[cfg(feature = "std")]
+    impl<'a> Object<'a> {
+        /// Tries to parse an `Object` from `bytes`
+        pub fn parse(bytes: &[u8]) -> error::Result<Object> {
+            use std::io::Cursor;
+            match peek(&mut Cursor::new(&bytes))? {
+                Hint::Elf(_) => Ok(Object::Elf(elf::Elf::parse(bytes)?)),
+                Hint::Mach(_) | Hint::MachFat(_) => Ok(Object::Mach(mach::Mach::parse(bytes)?)),
+                Hint::Archive => Ok(Object::Archive(archive::Archive::parse(bytes)?)),
+                Hint::PE => Ok(Object::PE(pe::PE::parse(bytes)?)),
+                Hint::Unknown(magic) => Ok(Object::Unknown(magic))
+            }
         }
     }
-}
+} // end if_endian_fd
 
 /////////////////////////
 // Binary Modules
@@ -303,15 +328,16 @@ pub mod elf;
 #[cfg(feature = "elf32")]
 /// The ELF 32-bit struct definitions and associated values, re-exported for easy "type-punning"
 pub mod elf32 {
-    pub use elf::header::header32 as header;
-    pub use elf::program_header::program_header32 as program_header;
-    pub use elf::section_header::section_header32 as section_header;
-    pub use elf::dyn::dyn32 as dyn;
-    pub use elf::sym::sym32 as sym;
-    pub use elf::reloc::reloc32 as reloc;
-    pub use elf::note::Nhdr32 as Note;
+    pub use crate::elf::header::header32 as header;
+    pub use crate::elf::program_header::program_header32 as program_header;
+    pub use crate::elf::section_header::section_header32 as section_header;
+    pub use crate::elf::dynamic::dyn32 as dynamic;
+    pub use crate::elf::sym::sym32 as sym;
+    pub use crate::elf::reloc::reloc32 as reloc;
+    pub use crate::elf::note::Nhdr32 as Note;
 
     pub mod gnu_hash {
+        pub use crate::elf::gnu_hash::hash;
         elf_gnu_hash_impl!(u32);
     }
 }
@@ -319,24 +345,25 @@ pub mod elf32 {
 #[cfg(feature = "elf64")]
 /// The ELF 64-bit struct definitions and associated values, re-exported for easy "type-punning"
 pub mod elf64 {
-    pub use elf::header::header64 as header;
-    pub use elf::program_header::program_header64 as program_header;
-    pub use elf::section_header::section_header64 as section_header;
-    pub use elf::dyn::dyn64 as dyn;
-    pub use elf::sym::sym64 as sym;
-    pub use elf::reloc::reloc64 as reloc;
-    pub use elf::note::Nhdr64 as Note;
+    pub use crate::elf::header::header64 as header;
+    pub use crate::elf::program_header::program_header64 as program_header;
+    pub use crate::elf::section_header::section_header64 as section_header;
+    pub use crate::elf::dynamic::dyn64 as dynamic;
+    pub use crate::elf::sym::sym64 as sym;
+    pub use crate::elf::reloc::reloc64 as reloc;
+    pub use crate::elf::note::Nhdr64 as Note;
 
     pub mod gnu_hash {
+        pub use crate::elf::gnu_hash::hash;
         elf_gnu_hash_impl!(u64);
     }
 }
 
-#[cfg(all(feature = "mach32", feature = "mach64", feature = "endian_fd"))]
+#[cfg(any(feature = "mach32", feature = "mach64"))]
 pub mod mach;
 
-#[cfg(all(feature = "pe32", feature = "pe64", feature = "endian_fd"))]
+#[cfg(any(feature = "pe32", feature = "pe64"))]
 pub mod pe;
 
-#[cfg(all(feature = "archive", feature = "std"))]
+#[cfg(feature = "archive")]
 pub mod archive;

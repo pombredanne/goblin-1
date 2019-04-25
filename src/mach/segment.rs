@@ -1,14 +1,18 @@
-use scroll::{self, Pread, Pwrite};
+use scroll::{Pread, Pwrite};
 use scroll::ctx::{self, SizeWith};
 
-use std::fmt;
-use std::ops::{Deref, DerefMut};
+use log::{debug, warn};
 
-use container;
-use error;
+use core::fmt;
+use core::ops::{Deref, DerefMut};
+use crate::alloc::boxed::Box;
+use crate::alloc::vec::Vec;
 
-use mach::relocation::RelocationInfo;
-use mach::load_command::{Section32, Section64, SegmentCommand32, SegmentCommand64, SIZEOF_SECTION_32, SIZEOF_SECTION_64, SIZEOF_SEGMENT_COMMAND_32, SIZEOF_SEGMENT_COMMAND_64, LC_SEGMENT, LC_SEGMENT_64};
+use crate::container;
+use crate::error;
+
+use crate::mach::relocation::RelocationInfo;
+use crate::mach::load_command::{Section32, Section64, SegmentCommand32, SegmentCommand64, SIZEOF_SECTION_32, SIZEOF_SECTION_64, SIZEOF_SEGMENT_COMMAND_32, SIZEOF_SEGMENT_COMMAND_64, LC_SEGMENT, LC_SEGMENT_64};
 
 pub struct RelocationIterator<'a> {
     data: &'a [u8],
@@ -70,10 +74,10 @@ impl Section {
         let offset = self.reloff as usize;
         debug!("Relocations for {} starting at offset: {:#x}", self.name().unwrap_or("BAD_SECTION_NAME"), offset);
         RelocationIterator {
-            offset: offset,
+            offset,
             nrelocs: self.nreloc as usize,
             count: 0,
-            data: data,
+            data,
             ctx: ctx.le,
         }
     }
@@ -137,8 +141,8 @@ impl From<Section32> for Section {
         Section {
             sectname: section.sectname,
             segname:  section.segname,
-            addr:     section.addr as u64,
-            size:     section.size as u64,
+            addr:     u64::from(section.addr),
+            size:     u64::from(section.size),
             offset:   section.offset,
             align:    section.align,
             reloff:   section.reloff,
@@ -165,7 +169,7 @@ impl From<Section64> for Section {
 }
 
 impl<'a> ctx::TryFromCtx<'a, container::Ctx> for Section {
-    type Error = ::error::Error;
+    type Error = crate::error::Error;
     type Size = usize;
     fn try_from_ctx(bytes: &'a [u8], ctx: container::Ctx) -> Result<(Self, Self::Size), Self::Error> {
         match ctx.container {
@@ -192,7 +196,7 @@ impl ctx::SizeWith<container::Ctx> for Section {
 }
 
 impl ctx::TryIntoCtx<container::Ctx> for Section {
-    type Error = ::error::Error;
+    type Error = crate::error::Error;
     type Size = usize;
     fn try_into_ctx(self, bytes: &mut [u8], ctx: container::Ctx) -> Result<Self::Size, Self::Error> {
         if ctx.is_big () {
@@ -220,7 +224,7 @@ pub struct SectionIterator<'a> {
 
 pub type SectionData<'a> = &'a [u8];
 
-impl<'a> ::std::iter::ExactSizeIterator for SectionIterator<'a> {
+impl<'a> ::core::iter::ExactSizeIterator for SectionIterator<'a> {
     fn len(&self) -> usize {
         self.count
     }
@@ -253,7 +257,7 @@ impl<'a> Iterator for SectionIterator<'a> {
                         });
                     Some(Ok((section, data)))
                 },
-                Err(e) => Some(Err(e.into()))
+                Err(e) => Some(Err(e))
             }
         }
     }
@@ -361,7 +365,7 @@ impl<'a> ctx::SizeWith<container::Ctx> for Segment<'a> {
 }
 
 impl<'a> ctx::TryIntoCtx<container::Ctx> for Segment<'a> {
-    type Error = ::error::Error;
+    type Error = crate::error::Error;
     type Size = usize;
     fn try_into_ctx(self, bytes: &mut [u8], ctx: container::Ctx) -> Result<Self::Size, Self::Error> {
         let segment_size = Self::size_with(&ctx);
@@ -403,7 +407,7 @@ impl<'a> Segment<'a> {
             data:     sections,
             offset:   0,
             raw_data: &[],
-            ctx:      ctx,
+            ctx,
         }
     }
     /// Get the name of this segment
@@ -419,30 +423,30 @@ impl<'a> Segment<'a> {
         Ok(sections)
     }
     /// Convert the raw C 32-bit segment command to a generalized version
-    pub fn from_32(bytes: &'a[u8], segment: &SegmentCommand32, offset: usize, ctx: container::Ctx) -> Self {
-        let data = &bytes[segment.fileoff as usize..(segment.fileoff + segment.filesize) as usize];
-        Segment {
+    pub fn from_32(bytes: &'a[u8], segment: &SegmentCommand32, offset: usize, ctx: container::Ctx) -> Result<Self, error::Error> {
+        let data = bytes.pread_with(segment.fileoff as usize, segment.filesize as usize)?;
+        Ok(Segment {
             cmd:      segment.cmd,
             cmdsize:  segment.cmdsize,
             segname:  segment.segname,
-            vmaddr:   segment.vmaddr   as u64,
-            vmsize:   segment.vmsize   as u64,
-            fileoff:  segment.fileoff  as u64,
-            filesize: segment.filesize as u64,
+            vmaddr:   u64::from(segment.vmaddr),
+            vmsize:   u64::from(segment.vmsize),
+            fileoff:  u64::from(segment.fileoff),
+            filesize: u64::from(segment.filesize),
             maxprot:  segment.maxprot,
             initprot: segment.initprot,
             nsects:   segment.nsects,
             flags:    segment.flags,
-            data:     data,
-            offset:   offset,
+            data,
+            offset,
             raw_data: bytes,
-            ctx:      ctx,
-        }
+            ctx,
+        })
     }
     /// Convert the raw C 64-bit segment command to a generalized version
-    pub fn from_64(bytes: &'a [u8], segment: &SegmentCommand64, offset: usize, ctx: container::Ctx) -> Self {
-        let data = &bytes[segment.fileoff as usize..(segment.fileoff + segment.filesize) as usize];
-        Segment {
+    pub fn from_64(bytes: &'a [u8], segment: &SegmentCommand64, offset: usize, ctx: container::Ctx) -> Result<Self, error::Error> {
+        let data = bytes.pread_with(segment.fileoff as usize, segment.filesize as usize)?;
+        Ok(Segment {
             cmd:      segment.cmd,
             cmdsize:  segment.cmdsize,
             segname:  segment.segname,
@@ -454,11 +458,11 @@ impl<'a> Segment<'a> {
             initprot: segment.initprot,
             nsects:   segment.nsects,
             flags:    segment.flags,
-            offset:   offset,
-            data:     data,
+            offset,
+            data,
             raw_data: bytes,
-            ctx:      ctx,
-        }
+            ctx,
+        })
     }
 }
 
@@ -484,7 +488,7 @@ impl<'a> DerefMut for Segments<'a> {
 
 impl<'a, 'b> IntoIterator for &'b Segments<'a> {
     type Item = &'b Segment<'a>;
-    type IntoIter = ::std::slice::Iter<'b, Segment<'a>>;
+    type IntoIter = ::core::slice::Iter<'b, Segment<'a>>;
     fn into_iter(self) -> Self::IntoIter {
         self.segments.iter()
     }
@@ -495,7 +499,7 @@ impl<'a> Segments<'a> {
     pub fn new(ctx: container::Ctx) -> Self {
         Segments {
             segments: Vec::new(),
-            ctx: ctx,
+            ctx,
         }
     }
     /// Get every section from every segment

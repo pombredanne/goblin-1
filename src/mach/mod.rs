@@ -1,10 +1,14 @@
 //! The Mach-o, mostly zero-copy, binary format parser and raw struct definitions
 use core::fmt;
+use crate::alloc::vec::Vec;
 
-use scroll::{self, Pread};
+use log::debug;
 
-use error;
-use container;
+use scroll::{Pread, BE};
+use scroll::ctx::SizeWith;
+
+use crate::error;
+use crate::container;
 
 pub mod header;
 pub mod constants;
@@ -22,6 +26,23 @@ pub use self::constants::cputype as cputype;
 /// Returns a big endian magical number
 pub fn peek(bytes: &[u8], offset: usize) -> error::Result<u32> {
     Ok(bytes.pread_with::<u32>(offset, scroll::BE)?)
+}
+
+/// Parses a magic number, and an accompanying mach-o binary parsing context, according to the magic number.
+pub fn parse_magic_and_ctx(bytes: &[u8], offset: usize) -> error::Result<(u32, Option<container::Ctx>)> {
+    use crate::mach::header::*;
+    use crate::container::Container;
+    let magic = bytes.pread_with::<u32>(offset, BE)?;
+    let ctx = match magic {
+        MH_CIGAM_64 | MH_CIGAM | MH_MAGIC_64 | MH_MAGIC => {
+            let is_lsb = magic == MH_CIGAM || magic == MH_CIGAM_64;
+            let le = scroll::Endian::from(is_lsb);
+            let container = if magic == MH_MAGIC_64 || magic == MH_CIGAM_64 { Container::Big } else { Container::Little };
+            Some(container::Ctx::new(container, le))
+        },
+        _ => None,
+    };
+    Ok((magic, ctx))
 }
 
 /// A cross-platform, zero-copy, endian-aware, 32/64 bit Mach-o binary parser
@@ -52,7 +73,6 @@ pub struct MachO<'a> {
     bind_interpreter: Option<imports::BindInterpreter<'a>>,
 }
 
-#[cfg(feature = "std")]
 impl<'a> fmt::Debug for MachO<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("MachO")
@@ -73,16 +93,19 @@ impl<'a> fmt::Debug for MachO<'a> {
 }
 
 impl<'a> MachO<'a> {
+    /// Is this a relocatable object file?
     pub fn is_object_file(&self) -> bool {
         self.header.filetype == header::MH_OBJECT
     }
+    /// Return an iterator over all the symbols in this binary
     pub fn symbols(&self) -> symbols::SymbolIterator<'a> {
-        if let &Some(ref symbols) = &self.symbols {
+        if let Some(ref symbols) = self.symbols {
             symbols.into_iter()
         } else {
             symbols::SymbolIterator::default()
         }
     }
+    /// Return a vector of the relocations in this binary
     pub fn relocations(&self) -> error::Result<Vec<(usize, segment::RelocationIterator, segment::Section)>> {
         debug!("Iterating relocations");
         let mut relocs = Vec::new();
@@ -107,19 +130,22 @@ impl<'a> MachO<'a> {
     /// Return the imported symbols in this binary that dyld knows about (if any)
     pub fn imports(&self) -> error::Result<Vec<imports::Import>> {
         if let Some(ref interpreter) = self.bind_interpreter {
-            interpreter.imports(self.libs.as_slice(), self.segments.as_slice(), &self.ctx)
+            interpreter.imports(self.libs.as_slice(), self.segments.as_slice(), self.ctx)
         } else {
             Ok(vec![])
         }
     }
     /// Parses the Mach-o binary from `bytes` at `offset`
     pub fn parse(bytes: &'a [u8], mut offset: usize) -> error::Result<MachO<'a>> {
+        let (magic, maybe_ctx) = parse_magic_and_ctx(bytes, offset)?;
+        let ctx = if let Some(ctx) = maybe_ctx { ctx } else { return Err(error::Error::BadMagic(u64::from(magic))) };
+        debug!("Ctx: {:?}", ctx);
         let offset = &mut offset;
-        let header: header::Header = bytes.pread(*offset)?;
-        let ctx = header.ctx()?;
+        let header: header::Header = bytes.pread_with(*offset, ctx)?;
+        debug!("Mach-o header: {:?}", header);
         let little_endian = ctx.le.is_little();
         let is_64 = ctx.container.is_big();
-        *offset = *offset + header.size();
+        *offset += header::Header::size_with(&ctx.container);
         let ncmds = header.ncmds;
         let mut cmds: Vec<load_command::LoadCommand> = Vec::with_capacity(ncmds);
         let mut symbols = None;
@@ -130,14 +156,16 @@ impl<'a> MachO<'a> {
         let mut main_entry_offset = None;
         let mut name = None;
         let mut segments = segment::Segments::new(ctx);
-        for _ in 0..ncmds {
+        for i in 0..ncmds {
             let cmd = load_command::LoadCommand::parse(bytes, offset, ctx.le)?;
+            debug!("{} - {:?}", i, cmd);
             match cmd.command {
                 load_command::CommandVariant::Segment32(command) => {
-                    segments.push(segment::Segment::from_32(bytes.as_ref(), &command, cmd.offset, ctx))
+                    // FIXME: we may want to be less strict about failure here, and just return an empty segment to allow parsing to continue?
+                    segments.push(segment::Segment::from_32(bytes, &command, cmd.offset, ctx)?)
                 },
                 load_command::CommandVariant::Segment64(command) => {
-                    segments.push(segment::Segment::from_64(bytes.as_ref(), &command, cmd.offset, ctx))
+                    segments.push(segment::Segment::from_64(bytes, &command, cmd.offset, ctx)?)
                 },
                 load_command::CommandVariant::Symtab(command) => {
                     symbols = Some(symbols::Symbols::parse(bytes, &command, ctx)?);
@@ -145,6 +173,7 @@ impl<'a> MachO<'a> {
                   load_command::CommandVariant::LoadDylib      (command)
                 | load_command::CommandVariant::LoadUpwardDylib(command)
                 | load_command::CommandVariant::ReexportDylib  (command)
+                | load_command::CommandVariant::LoadWeakDylib  (command)
                 | load_command::CommandVariant::LazyLoadDylib  (command) => {
                     let lib = bytes.pread::<&str>(cmd.offset + command.dylib.name as usize)?;
                     libs.push(lib);
@@ -196,25 +225,24 @@ impl<'a> MachO<'a> {
         };
 
         Ok(MachO {
-            header: header,
+            header,
             load_commands: cmds,
-            segments: segments,
-            symbols: symbols,
-            libs: libs,
-            export_trie: export_trie,
-            bind_interpreter: bind_interpreter,
-            entry: entry,
-            old_style_entry: old_style_entry,
-            name: name,
-            ctx: ctx,
-            is_64: is_64,
-            little_endian: little_endian,
+            segments,
+            symbols,
+            libs,
+            export_trie,
+            bind_interpreter,
+            entry,
+            old_style_entry,
+            name,
+            ctx,
+            is_64,
+            little_endian,
             data: bytes,
         })
     }
 }
 
-#[cfg(feature = "std")]
 /// A Mach-o multi architecture (Fat) binary container
 pub struct MultiArch<'a> {
     data: &'a [u8],
@@ -237,7 +265,7 @@ impl<'a> Iterator for FatArchIterator<'a> {
             None
         } else {
             let offset = (self.index * fat::SIZEOF_FAT_ARCH) + self.start;
-            let arch = self.data.pread_with::<fat::FatArch>(offset, scroll::BE).map_err(|e| e.into());
+            let arch = self.data.pread_with::<fat::FatArch>(offset, scroll::BE).map_err(core::convert::Into::into);
             self.index += 1;
             Some(arch)
         }
@@ -286,7 +314,6 @@ impl<'a, 'b> IntoIterator for &'b MultiArch<'a> {
     }
 }
 
-#[cfg(feature = "std")]
 impl<'a> MultiArch<'a> {
     /// Lazily construct `Self`
     pub fn new(bytes: &'a [u8]) -> error::Result<Self> {
@@ -317,7 +344,7 @@ impl<'a> MultiArch<'a> {
     /// Try to get the Mach-o binary at `index`
     pub fn get(&self, index: usize) -> error::Result<MachO<'a>> {
         if index >= self.narches {
-            return Err(error::Error::Malformed(format!("Requested the {}-th binary, but there are only {} architectures in this container", index, self.narches).into()))
+            return Err(error::Error::Malformed(format!("Requested the {}-th binary, but there are only {} architectures in this container", index, self.narches)))
         }
         let offset = (index * fat::SIZEOF_FAT_ARCH) + self.start;
         let arch = self.data.pread_with::<fat::FatArch>(offset, scroll::BE)?;
@@ -343,7 +370,6 @@ impl<'a> MultiArch<'a> {
     }
 }
 
-#[cfg(feature = "std")]
 impl<'a> fmt::Debug for MultiArch<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("MultiArch")
@@ -354,6 +380,7 @@ impl<'a> fmt::Debug for MultiArch<'a> {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 /// Either a collection of multiple architectures, or a single mach-o binary
 pub enum Mach<'a> {
     /// A "fat" multi-architecture binary container
@@ -367,8 +394,7 @@ impl<'a> Mach<'a> {
     pub fn parse(bytes: &'a [u8]) -> error::Result<Self> {
         let size = bytes.len();
         if size < 4 {
-            let error = error::Error::Malformed(
-                                       format!("size is smaller than a magical number"));
+            let error = error::Error::Malformed("size is smaller than a magical number".into());
             return Err(error);
         }
         let magic = peek(&bytes, 0)?;
@@ -377,7 +403,7 @@ impl<'a> Mach<'a> {
                 let multi = MultiArch::new(bytes)?;
                 Ok(Mach::Fat(multi))
             },
-            // we're a regular binary
+            // we might be a regular binary
             _ => {
                 let binary = MachO::parse(bytes, 0)?;
                 Ok(Mach::Binary(binary))
