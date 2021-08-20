@@ -190,6 +190,13 @@ pub const SEG_UNIXSTACK: &str = "__UNIXSTACK";
 /// the segment for the self (dyld) modifing code stubs that has read, write and execute permissions
 pub const SEG_IMPORT: &str = "__IMPORT";
 
+/// Segment is readable.
+pub const VM_PROT_READ: u32 = 0x1;
+/// Segment is writable.
+pub const VM_PROT_WRITE: u32 = 0x2;
+/// Segment is executable.
+pub const VM_PROT_EXECUTE: u32 = 0x4;
+
 pub mod cputype {
 
     /// An alias for u32
@@ -203,6 +210,8 @@ pub mod cputype {
     pub const CPU_ARCH_MASK: CpuType = 0xff00_0000;
     /// the mask for 64 bit ABI
     pub const CPU_ARCH_ABI64: CpuType = 0x0100_0000;
+    /// the mask for ILP32 ABI on 64 bit hardware
+    pub const CPU_ARCH_ABI64_32: CpuType = 0x0200_0000;
 
     // CPU Types
     pub const CPU_TYPE_ANY: CpuType = !0;
@@ -210,18 +219,19 @@ pub mod cputype {
     pub const CPU_TYPE_MC680X0: CpuType = 6;
     pub const CPU_TYPE_X86: CpuType = 7;
     pub const CPU_TYPE_I386: CpuType = CPU_TYPE_X86;
-    pub const CPU_TYPE_X86_64: CpuType = (CPU_TYPE_X86 | CPU_ARCH_ABI64);
+    pub const CPU_TYPE_X86_64: CpuType = CPU_TYPE_X86 | CPU_ARCH_ABI64;
     pub const CPU_TYPE_MIPS: CpuType = 8;
     pub const CPU_TYPE_MC98000: CpuType = 10;
     pub const CPU_TYPE_HPPA: CpuType = 11;
     pub const CPU_TYPE_ARM: CpuType = 12;
-    pub const CPU_TYPE_ARM64: CpuType = (CPU_TYPE_ARM | CPU_ARCH_ABI64);
+    pub const CPU_TYPE_ARM64: CpuType = CPU_TYPE_ARM | CPU_ARCH_ABI64;
+    pub const CPU_TYPE_ARM64_32: CpuType = CPU_TYPE_ARM | CPU_ARCH_ABI64_32;
     pub const CPU_TYPE_MC88000: CpuType = 13;
     pub const CPU_TYPE_SPARC: CpuType = 14;
     pub const CPU_TYPE_I860: CpuType = 15;
     pub const CPU_TYPE_ALPHA: CpuType = 16;
     pub const CPU_TYPE_POWERPC: CpuType = 18;
-    pub const CPU_TYPE_POWERPC64: CpuType = (CPU_TYPE_POWERPC | CPU_ARCH_ABI64);
+    pub const CPU_TYPE_POWERPC64: CpuType = CPU_TYPE_POWERPC | CPU_ARCH_ABI64;
 
     // CPU Subtypes
     pub const CPU_SUBTYPE_MULTIPLE: CpuSubType = !0;
@@ -246,9 +256,9 @@ pub mod cputype {
     pub const CPU_SUBTYPE_MC68030_ONLY: CpuSubType = 3;
 
     macro_rules! CPU_SUBTYPE_INTEL {
-        ($f:expr, $m:expr) => ({
+        ($f:expr, $m:expr) => {{
             ($f) + (($m) << 4)
-        })
+        }};
     }
 
     pub const CPU_SUBTYPE_I386_ALL: CpuSubType = CPU_SUBTYPE_INTEL!(3, 0);
@@ -326,6 +336,8 @@ pub mod cputype {
     pub const CPU_SUBTYPE_ARM64_ALL: CpuSubType = 0;
     pub const CPU_SUBTYPE_ARM64_V8: CpuSubType = 1;
     pub const CPU_SUBTYPE_ARM64_E: CpuSubType = 2;
+    pub const CPU_SUBTYPE_ARM64_32_ALL: CpuSubType = 0;
+    pub const CPU_SUBTYPE_ARM64_32_V8: CpuSubType = 1;
 
     macro_rules! cpu_flag_mapping {
         (
@@ -339,6 +351,29 @@ pub mod cputype {
             }
 
             /// Get the architecture name from cputype and cpusubtype
+            ///
+            /// When using this method to determine the architecture
+            /// name of an instance of
+            /// [`goblin::mach::header::Header`](/goblin/mach/header/struct.Header.html),
+            /// use the provided method
+            /// [`cputype()`](/goblin/mach/header/struct.Header.html#method.cputype) and
+            /// [`cpusubtype()`](/goblin/mach/header/struct.Header.html#method.cpusubtype)
+            /// instead of corresponding field `cputype` and `cpusubtype`.
+            ///
+            /// For example:
+            ///
+            /// ```rust
+            /// use std::fs::read;
+            /// use goblin::mach::constants::cputype::get_arch_name_from_types;
+            /// use goblin::mach::Mach;
+            ///
+            /// read("path/to/macho").and_then(|buf| {
+            ///     if let Ok(Mach::Binary(a)) = Mach::parse(&buf) {
+            ///         println!("arch name: {}", get_arch_name_from_types(a.header.cputype(), a.header.cpusubtype()).unwrap());
+            ///     }
+            ///     Ok(())
+            /// });
+            /// ```
             pub fn get_arch_name_from_types(cputype: CpuType, cpusubtype: CpuSubType)
                 -> Option<&'static str> {
                 match (cputype, cpusubtype) {
@@ -375,6 +410,7 @@ pub mod cputype {
         ("x86_64", CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL),
         ("x86_64h", CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_H),
         ("arm64", CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL),
+        ("arm64_32", CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_ALL),
         ("ppc970-64", CPU_TYPE_POWERPC64, CPU_SUBTYPE_POWERPC_970),
         ("ppc", CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_ALL),
         ("i386", CPU_TYPE_I386, CPU_SUBTYPE_I386_ALL),
@@ -417,6 +453,7 @@ pub mod cputype {
         ("armv7em", CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7EM),
         ("arm64v8", CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_V8),
         ("arm64e", CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_E),
+        ("arm64_32_v8", CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_V8),
     }
 }
 
@@ -426,9 +463,21 @@ mod tests {
     fn test_basic_mapping() {
         use super::cputype::*;
 
-        assert_eq!(get_arch_from_flag("armv7"), Some((CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7)));
-        assert_eq!(get_arch_name_from_types(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7), Some("armv7"));
-        assert_eq!(get_arch_from_flag("i386"), Some((CPU_TYPE_I386, CPU_SUBTYPE_I386_ALL)));
-        assert_eq!(get_arch_from_flag("x86"), Some((CPU_TYPE_I386, CPU_SUBTYPE_I386_ALL)));
+        assert_eq!(
+            get_arch_from_flag("armv7"),
+            Some((CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7))
+        );
+        assert_eq!(
+            get_arch_name_from_types(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7),
+            Some("armv7")
+        );
+        assert_eq!(
+            get_arch_from_flag("i386"),
+            Some((CPU_TYPE_I386, CPU_SUBTYPE_I386_ALL))
+        );
+        assert_eq!(
+            get_arch_from_flag("x86"),
+            Some((CPU_TYPE_I386, CPU_SUBTYPE_I386_ALL))
+        );
     }
 }

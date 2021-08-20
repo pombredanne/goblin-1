@@ -126,9 +126,9 @@ macro_rules! elf_reloc {
     };
 }
 
-macro_rules! elf_rela_std_impl { ($size:ident, $isize:ty) => {
-
-    if_alloc! {
+macro_rules! elf_rela_std_impl {
+    ($size:ident, $isize:ty) => {
+        if_alloc! {
             use crate::elf::reloc::Reloc;
 
             use core::slice;
@@ -218,7 +218,6 @@ macro_rules! elf_rela_std_impl { ($size:ident, $isize:ty) => {
     };
 }
 
-
 pub mod reloc32 {
 
     pub use crate::elf::reloc::*;
@@ -245,7 +244,6 @@ pub mod reloc32 {
 
     elf_rela_std_impl!(u32, i32);
 }
-
 
 pub mod reloc64 {
     pub use crate::elf::reloc::*;
@@ -282,8 +280,7 @@ if_alloc! {
     use core::fmt;
     use core::result;
     use crate::container::{Ctx, Container};
-    #[cfg(feature = "endian_fd")]
-    use crate::alloc::vec::Vec;
+    use alloc::vec::Vec;
 
     #[derive(Clone, Copy, PartialEq, Default)]
     /// A unified ELF relocation structure
@@ -308,8 +305,7 @@ if_alloc! {
     type RelocCtx = (bool, Ctx);
 
     impl ctx::SizeWith<RelocCtx> for Reloc {
-        type Units = usize;
-        fn size_with( &(is_rela, Ctx { container, .. }): &RelocCtx) -> Self::Units {
+        fn size_with( &(is_rela, Ctx { container, .. }): &RelocCtx) -> usize {
             match container {
                 Container::Little => {
                     if is_rela { reloc32::SIZEOF_RELA } else { reloc32::SIZEOF_REL }
@@ -323,8 +319,7 @@ if_alloc! {
 
     impl<'a> ctx::TryFromCtx<'a, RelocCtx> for Reloc {
         type Error = crate::error::Error;
-        type Size = usize;
-        fn try_from_ctx(bytes: &'a [u8], (is_rela, Ctx { container, le }): RelocCtx) -> result::Result<(Self, Self::Size), Self::Error> {
+        fn try_from_ctx(bytes: &'a [u8], (is_rela, Ctx { container, le }): RelocCtx) -> result::Result<(Self, usize), Self::Error> {
             use scroll::Pread;
             let reloc = match container {
                 Container::Little => {
@@ -348,10 +343,8 @@ if_alloc! {
 
     impl ctx::TryIntoCtx<RelocCtx> for Reloc {
         type Error = crate::error::Error;
-        type Size = usize;
-        // TODO: I think this is a bad idea
         /// Writes the relocation into `bytes`
-        fn try_into_ctx(self, bytes: &mut [u8], (is_rela, Ctx {container, le}): RelocCtx) -> result::Result<Self::Size, Self::Error> {
+        fn try_into_ctx(self, bytes: &mut [u8], (is_rela, Ctx {container, le}): RelocCtx) -> result::Result<usize, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {

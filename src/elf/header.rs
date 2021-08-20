@@ -69,7 +69,7 @@ macro_rules! elf_header {
                     .finish()
             }
         }
-    }
+    };
 }
 
 /// No file type.
@@ -109,6 +109,20 @@ pub const ELFDATANONE: u8 = 0;
 pub const ELFDATA2LSB: u8 = 1;
 /// 2's complement, big endian.
 pub const ELFDATA2MSB: u8 = 2;
+
+/// File version byte index.
+pub const EI_VERSION: usize = 6;
+/// Current ELF version.
+pub const EV_CURRENT: u8 = 1;
+
+/// OS ABI byte index.
+pub const EI_OSABI: usize = 7;
+/// UNIX System V ABI.
+pub const ELFOSABI_NONE: u8 = 0;
+
+/// ABI version byte index.
+pub const EI_ABIVERSION: usize = 8;
+
 /// Number of bytes in an identifier.
 pub const SIZEOF_IDENT: usize = 16;
 
@@ -142,7 +156,7 @@ if_alloc! {
     use scroll::{ctx, Endian};
     use core::fmt;
     use crate::container::{Ctx, Container};
-    use crate::alloc::string::ToString;
+    use alloc::string::ToString;
 
     #[derive(Copy, Clone, PartialEq)]
     /// An ELF header
@@ -212,8 +226,8 @@ if_alloc! {
                     70,
                     typ,
                     byteorder,
-                    1,
-                    0,
+                    EV_CURRENT,
+                    ELFOSABI_NONE,
                     0,
                     0,
                     0,
@@ -262,7 +276,6 @@ if_alloc! {
     }
 
     impl ctx::SizeWith<crate::container::Ctx> for Header {
-        type Units = usize;
         fn size_with(ctx: &crate::container::Ctx) -> usize {
             match ctx.container {
                 Container::Little => {
@@ -277,8 +290,7 @@ if_alloc! {
 
     impl<'a> ctx::TryFromCtx<'a, scroll::Endian> for Header {
         type Error = crate::error::Error;
-        type Size = usize;
-        fn try_from_ctx(bytes: &'a [u8], _ctx: scroll::Endian) -> error::Result<(Self, Self::Size)> {
+        fn try_from_ctx(bytes: &'a [u8], _ctx: scroll::Endian) -> error::Result<(Self, usize)> {
             use scroll::Pread;
             if bytes.len() < SIZEOF_IDENT {
                 return Err(error::Error::Malformed("Too small".to_string()));
@@ -303,11 +315,9 @@ if_alloc! {
         }
     }
 
-    // TODO: i think we should remove this forcing of the information in the header, it causes too many conflicts
     impl ctx::TryIntoCtx<scroll::Endian> for Header {
         type Error = crate::error::Error;
-        type Size = usize;
-        fn try_into_ctx(self, bytes: &mut [u8], _ctx: scroll::Endian) -> Result<Self::Size, Self::Error> {
+        fn try_into_ctx(self, bytes: &mut [u8], _ctx: scroll::Endian) -> Result<usize, Self::Error> {
             use scroll::Pwrite;
             match self.container()? {
                 Container::Little => {
@@ -396,8 +406,7 @@ macro_rules! elf_header_std_impl {
 
             impl<'a> ctx::TryFromCtx<'a, scroll::Endian> for Header {
                 type Error = crate::error::Error;
-                type Size = usize;
-                fn try_from_ctx(bytes: &'a [u8], _: scroll::Endian) -> result::Result<(Self, Self::Size), Self::Error> {
+                fn try_from_ctx(bytes: &'a [u8], _: scroll::Endian) -> result::Result<(Self, usize), Self::Error> {
                     let mut elf_header = Header::default();
                     let offset = &mut 0;
                     bytes.gread_inout(offset, &mut elf_header.e_ident)?;
@@ -426,9 +435,8 @@ macro_rules! elf_header_std_impl {
 
             impl ctx::TryIntoCtx<scroll::Endian> for Header {
                 type Error = crate::error::Error;
-                type Size = usize;
                 /// a Pwrite impl for Header: **note** we use the endianness value in the header, and not a parameter
-                fn try_into_ctx(self, bytes: &mut [u8], _endianness: scroll::Endian) -> result::Result<Self::Size, Self::Error> {
+                fn try_into_ctx(self, bytes: &mut [u8], _endianness: scroll::Endian) -> result::Result<usize, Self::Error> {
                     use scroll::{Pwrite};
                     let offset = &mut 0;
                     let endianness =
@@ -508,23 +516,22 @@ macro_rules! elf_header_test {
     ($class:expr) => {
         #[cfg(test)]
         mod tests {
-            use scroll::{Pwrite, Pread};
-            use crate::elf::header::Header as ElfHeader;
             use super::*;
-            use crate::container::{Ctx, Container};
-            use crate::alloc::vec::Vec;
+            use crate::container::{Container, Ctx};
+            use crate::elf::header::Header as ElfHeader;
+            use alloc::vec::Vec;
+            use scroll::{Pread, Pwrite};
             #[test]
             fn size_of() {
                 assert_eq!(::std::mem::size_of::<Header>(), SIZEOF_EHDR);
             }
             #[test]
-            fn header_read_write () {
-                let crt1: Vec<u8> =
-                    if $class == ELFCLASS64 {
-                        include!("../../etc/crt1.rs")
-                    } else {
-                        include!("../../etc/crt132.rs")
-                    };
+            fn header_read_write() {
+                let crt1: Vec<u8> = if $class == ELFCLASS64 {
+                    include!("../../etc/crt1.rs")
+                } else {
+                    include!("../../etc/crt132.rs")
+                };
                 let header: Header = crt1.pread(0).unwrap();
                 assert_eq!(header.e_type, ET_REL);
                 println!("header: {:?}", &header);
@@ -534,13 +541,12 @@ macro_rules! elf_header_test {
                 assert_eq!(header, header2);
             }
             #[test]
-            fn elfheader_read_write () {
-                let (container, crt1): (Container, Vec<u8>) =
-                    if $class == ELFCLASS64 {
-                        (Container::Big, include!("../../etc/crt1.rs"))
-                    } else {
-                        (Container::Little, include!("../../etc/crt132.rs"))
-                    };
+            fn elfheader_read_write() {
+                let (container, crt1): (Container, Vec<u8>) = if $class == ELFCLASS64 {
+                    (Container::Big, include!("../../etc/crt1.rs"))
+                } else {
+                    (Container::Little, include!("../../etc/crt132.rs"))
+                };
                 let header: Header = crt1.pread(0).unwrap();
                 assert_eq!(header.e_type, ET_REL);
                 println!("header: {:?}", &header);
@@ -556,7 +562,7 @@ macro_rules! elf_header_test {
                 bytes.pwrite(header, 0).unwrap();
             }
         }
-    }
+    };
 }
 
 pub mod header32 {

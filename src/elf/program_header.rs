@@ -83,7 +83,8 @@ if_alloc! {
     use core::result;
     use core::ops::Range;
     use crate::container::{Ctx, Container};
-    use crate::alloc::vec::Vec;
+    use crate::error;
+    use alloc::vec::Vec;
 
     #[derive(Default, PartialEq, Clone)]
     /// A unified ProgramHeader - convertable to and from 32-bit and 64-bit variants
@@ -121,11 +122,11 @@ if_alloc! {
         }
         /// Returns this program header's file offset range
         pub fn file_range(&self) -> Range<usize> {
-            (self.p_offset as usize..self.p_offset as usize + self.p_filesz as usize)
+            self.p_offset as usize..self.p_offset as usize + self.p_filesz as usize
         }
         /// Returns this program header's virtual memory range
         pub fn vm_range(&self) -> Range<usize> {
-            (self.p_vaddr as usize..self.p_vaddr as usize + self.p_memsz as usize)
+            self.p_vaddr as usize..self.p_vaddr as usize + self.p_memsz as usize
         }
         /// Sets the executable flag
         pub fn executable(&mut self) {
@@ -154,6 +155,11 @@ if_alloc! {
         #[cfg(feature = "endian_fd")]
         pub fn parse(bytes: &[u8], mut offset: usize, count: usize, ctx: Ctx) -> crate::error::Result<Vec<ProgramHeader>> {
             use scroll::Pread;
+            // Sanity check to avoid OOM
+            if count > bytes.len() / Self::size(ctx) {
+                let message = format!("Buffer is too short for {} program headers", count);
+                return Err(error::Error::Malformed(message));
+            }
             let mut program_headers = Vec::with_capacity(count);
             for _ in 0..count {
                 let phdr = bytes.gread_with(&mut offset, ctx)?;
@@ -179,7 +185,6 @@ if_alloc! {
     }
 
     impl ctx::SizeWith<Ctx> for ProgramHeader {
-        type Units = usize;
         fn size_with(ctx: &Ctx) -> usize {
             match ctx.container {
                 Container::Little => {
@@ -194,8 +199,7 @@ if_alloc! {
 
     impl<'a> ctx::TryFromCtx<'a, Ctx> for ProgramHeader {
         type Error = crate::error::Error;
-        type Size = usize;
-        fn try_from_ctx(bytes: &'a [u8], Ctx { container, le}: Ctx) -> result::Result<(Self, Self::Size), Self::Error> {
+        fn try_from_ctx(bytes: &'a [u8], Ctx { container, le}: Ctx) -> result::Result<(Self, usize), Self::Error> {
             use scroll::Pread;
             let res = match container {
                 Container::Little => {
@@ -211,8 +215,7 @@ if_alloc! {
 
     impl ctx::TryIntoCtx<Ctx> for ProgramHeader {
         type Error = crate::error::Error;
-        type Size = usize;
-        fn try_into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) -> result::Result<Self::Size, Self::Error> {
+        fn try_into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) -> result::Result<usize, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {
@@ -317,6 +320,9 @@ macro_rules! elf_program_header_std_impl { ($size:ty) => {
                 phdrs
             }
 
+            /// # Safety
+            ///
+            /// This function creates a `ProgramHeader` directly from a raw pointer
             pub unsafe fn from_raw_parts<'a>(phdrp: *const ProgramHeader,
                                              phnum: usize)
                                              -> &'a [ProgramHeader] {
@@ -345,7 +351,7 @@ pub mod program_header32 {
     #[repr(C)]
     #[derive(Copy, Clone, PartialEq, Default)]
     #[cfg_attr(feature = "alloc", derive(Pread, Pwrite, SizeWith))]
-    /// A 64-bit ProgramHeader typically specifies how to map executable and data segments into memory
+    /// A 32-bit ProgramHeader typically specifies how to map executable and data segments into memory
     pub struct ProgramHeader {
         /// Segment type
         pub p_type: u32,
@@ -367,13 +373,11 @@ pub mod program_header32 {
 
     pub const SIZEOF_PHDR: usize = 32;
 
-    use plain;
     // Declare that this is a plain type.
     unsafe impl plain::Plain for ProgramHeader {}
 
     elf_program_header_std_impl!(u32);
 }
-
 
 pub mod program_header64 {
     pub use crate::elf::program_header::*;
@@ -381,7 +385,7 @@ pub mod program_header64 {
     #[repr(C)]
     #[derive(Copy, Clone, PartialEq, Default)]
     #[cfg_attr(feature = "alloc", derive(Pread, Pwrite, SizeWith))]
-    /// A 32-bit ProgramHeader typically specifies how to map executable and data segments into memory
+    /// A 64-bit ProgramHeader typically specifies how to map executable and data segments into memory
     pub struct ProgramHeader {
         /// Segment type
         pub p_type: u32,
@@ -403,7 +407,6 @@ pub mod program_header64 {
 
     pub const SIZEOF_PHDR: usize = 56;
 
-    use plain;
     // Declare that this is a plain type.
     unsafe impl plain::Plain for ProgramHeader {}
 

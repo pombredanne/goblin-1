@@ -1,10 +1,14 @@
 macro_rules! elf_section_header {
     ($size:ident) => {
-        #[cfg(feature = "alloc")]
-        use scroll::{Pread, Pwrite, SizeWith};
+        // XXX: Do not import scroll traits here.
+        // See: https://github.com/rust-lang/rust/issues/65090#issuecomment-538668155
+
         #[repr(C)]
         #[derive(Copy, Clone, Eq, PartialEq, Default)]
-        #[cfg_attr(feature = "alloc", derive(Pread, Pwrite, SizeWith))]
+        #[cfg_attr(
+            feature = "alloc",
+            derive(scroll::Pread, scroll::Pwrite, scroll::SizeWith)
+        )]
         /// Section Headers are typically used by humans and static linkers for additional information or how to relocate the object
         ///
         /// **NOTE** section headers are strippable from a binary without any loss of portability/executability; _do not_ rely on them being there!
@@ -51,7 +55,7 @@ macro_rules! elf_section_header {
                     .finish()
             }
         }
-    }
+    };
 }
 
 /// Undefined section.
@@ -143,6 +147,8 @@ pub const SHT_HISUNW: u32 = 0x6fff_ffff;
 pub const SHT_HIOS: u32 = 0x6fff_ffff;
 /// Start of processor-specific.
 pub const SHT_LOPROC: u32 = 0x7000_0000;
+/// X86-64 unwind information.
+pub const SHT_X86_64_UNWIND: u32 = 0x7000_0001;
 /// End of processor-specific.
 pub const SHT_HIPROC: u32 = 0x7fff_ffff;
 /// Start of application-specific.
@@ -231,6 +237,7 @@ pub fn sht_to_str(sht: u32) -> &'static str {
         SHT_GNU_VERNEED => "SHT_GNU_VERNEED",
         SHT_GNU_VERSYM => "SHT_GNU_VERSYM",
         SHT_LOPROC => "SHT_LOPROC",
+        SHT_X86_64_UNWIND => "SHT_X86_64_UNWIND",
         SHT_HIPROC => "SHT_HIPROC",
         SHT_LOUSER => "SHT_LOUSER",
         SHT_HIUSER => "SHT_HIUSER",
@@ -253,7 +260,7 @@ pub fn shf_to_str(shf: u32) -> &'static str {
         SHF_COMPRESSED => "SHF_COMPRESSED",
         //SHF_MASKOS..SHF_MASKPROC => "SHF_OSFLAG",
         SHF_ORDERED => "SHF_ORDERED",
-        _ => "SHF_UNKNOWN"
+        _ => "SHF_UNKNOWN",
     }
 }
 
@@ -272,7 +279,7 @@ macro_rules! elf_section_header_std_impl { ($size:ty) => {
         use crate::elf::section_header::SectionHeader as ElfSectionHeader;
 
         use plain::Plain;
-        use crate::alloc::vec::Vec;
+        use alloc::vec::Vec;
 
         if_std! {
             use crate::error::Result;
@@ -337,7 +344,6 @@ macro_rules! elf_section_header_std_impl { ($size:ty) => {
     } // end if_alloc
 };}
 
-
 pub mod section_header32 {
     pub use crate::elf::section_header::*;
 
@@ -347,7 +353,6 @@ pub mod section_header32 {
 
     elf_section_header_std_impl!(u32);
 }
-
 
 pub mod section_header64 {
 
@@ -373,7 +378,7 @@ if_alloc! {
     use crate::container::{Container, Ctx};
 
     #[cfg(feature = "endian_fd")]
-    use crate::alloc::vec::Vec;
+    use alloc::vec::Vec;
 
     #[derive(Default, PartialEq, Clone)]
     /// A unified SectionHeader - convertable to and from 32-bit and 64-bit variants
@@ -421,26 +426,45 @@ if_alloc! {
                 sh_entsize: 0,
             }
         }
-        /// Returns this section header's file offset range
-        pub fn file_range(&self) -> Range<usize> {
-            (self.sh_offset as usize..self.sh_offset as usize + self.sh_size as usize)
+        /// Returns this section header's file offset range,
+        /// if the section occupies space in fhe file.
+        pub fn file_range(&self) -> Option<Range<usize>> {
+            // Sections with type SHT_NOBITS have no data in the file itself,
+            // they only exist in memory.
+            if self.sh_type == SHT_NOBITS {
+                None
+            } else {
+                Some(self.sh_offset as usize..(self.sh_offset as usize).saturating_add(self.sh_size as usize))
+            }
         }
         /// Returns this section header's virtual memory range
         pub fn vm_range(&self) -> Range<usize> {
-            (self.sh_addr as usize..self.sh_addr as usize + self.sh_size as usize)
+            self.sh_addr as usize..(self.sh_addr as usize).saturating_add(self.sh_size as usize)
         }
         /// Parse `count` section headers from `bytes` at `offset`, using the given `ctx`
         #[cfg(feature = "endian_fd")]
-        pub fn parse(bytes: &[u8], mut offset: usize, count: usize, ctx: Ctx) -> error::Result<Vec<SectionHeader>> {
+        pub fn parse(bytes: &[u8], mut offset: usize, mut count: usize, ctx: Ctx) -> error::Result<Vec<SectionHeader>> {
             use scroll::Pread;
-            let mut section_headers = Vec::with_capacity(count);
-            let mut nsection_headers = count;
+            // Zero offset means no section headers, not even the null section header.
+            if offset == 0 {
+                return Ok(Vec::new());
+            }
             let empty_sh = bytes.gread_with::<SectionHeader>(&mut offset, ctx)?;
             if count == 0 as usize {
-                nsection_headers = empty_sh.sh_size as usize;
+                // Zero count means either no section headers if offset is also zero (checked
+                // above), or the number of section headers overflows SHN_LORESERVE, in which
+                // case the count is stored in the sh_size field of the null section header.
+                count = empty_sh.sh_size as usize;
             }
+
+            // Sanity check to avoid OOM
+            if count > bytes.len() / Self::size(ctx) {
+                let message = format!("Buffer is too short for {} section headers", count);
+                return Err(error::Error::Malformed(message));
+            }
+            let mut section_headers = Vec::with_capacity(count);
             section_headers.push(empty_sh);
-            for _ in 1..nsection_headers {
+            for _ in 1..count {
                 let shdr = bytes.gread_with(&mut offset, ctx)?;
                 section_headers.push(shdr);
             }
@@ -454,6 +478,12 @@ if_alloc! {
             if overflow || end > size as u64 {
                 let message = format!("Section {} size ({}) + offset ({}) is out of bounds. Overflowed: {}",
                     self.sh_name, self.sh_offset, self.sh_size, overflow);
+                return Err(error::Error::Malformed(message));
+            }
+            let (_, overflow) = self.sh_addr.overflowing_add(self.sh_size);
+            if overflow {
+                let message = format!("Section {} size ({}) + addr ({}) is out of bounds. Overflowed: {}",
+                    self.sh_name, self.sh_addr, self.sh_size, overflow);
                 return Err(error::Error::Malformed(message));
             }
             Ok(())
@@ -490,8 +520,7 @@ if_alloc! {
     }
 
     impl ctx::SizeWith<Ctx> for SectionHeader {
-        type Units = usize;
-        fn size_with( &Ctx { container, .. }: &Ctx) -> Self::Units {
+        fn size_with( &Ctx { container, .. }: &Ctx) -> usize {
             match container {
                 Container::Little => {
                     section_header32::SIZEOF_SHDR
@@ -505,8 +534,7 @@ if_alloc! {
 
     impl<'a> ctx::TryFromCtx<'a, Ctx> for SectionHeader {
         type Error = crate::error::Error;
-        type Size = usize;
-        fn try_from_ctx(bytes: &'a [u8], Ctx {container, le}: Ctx) -> result::Result<(Self, Self::Size), Self::Error> {
+        fn try_from_ctx(bytes: &'a [u8], Ctx {container, le}: Ctx) -> result::Result<(Self, usize), Self::Error> {
             use scroll::Pread;
             let res = match container {
                 Container::Little => {
@@ -522,8 +550,7 @@ if_alloc! {
 
     impl ctx::TryIntoCtx<Ctx> for SectionHeader {
         type Error = crate::error::Error;
-        type Size = usize;
-        fn try_into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) -> result::Result<Self::Size, Self::Error> {
+        fn try_into_ctx(self, bytes: &mut [u8], Ctx {container, le}: Ctx) -> result::Result<usize, Self::Error> {
             use scroll::Pwrite;
             match container {
                 Container::Little => {

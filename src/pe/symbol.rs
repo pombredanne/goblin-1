@@ -1,7 +1,8 @@
 use crate::error;
 use crate::strtab;
+use alloc::vec::Vec;
 use core::fmt::{self, Debug};
-use scroll::{Pread, Pwrite};
+use scroll::{ctx, IOread, IOwrite, Pread, Pwrite, SizeWith};
 
 /// Size of a single symbol in the COFF Symbol Table.
 pub const COFF_SYMBOL_SIZE: usize = 18;
@@ -16,6 +17,7 @@ pub const IMAGE_SYM_UNDEFINED: i16 = 0;
 pub const IMAGE_SYM_ABSOLUTE: i16 = -1;
 /// The symbol provides general type or debugging information but does not
 /// correspond to a section.
+pub const IMAGE_SYM_DEBUG: i16 = -2;
 
 // Base types for `Symbol::typ`.
 
@@ -162,7 +164,7 @@ pub const IMAGE_SYM_CLASS_CLR_TOKEN: u8 = 107;
 ///
 /// [`ExceptionData::get_unwind_info`]: struct.ExceptionData.html#method.get_unwind_info
 #[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq, Default, Pread, Pwrite)]
+#[derive(Debug, Copy, Clone, PartialEq, Default, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct Symbol {
     /// The name of the symbol.
     ///
@@ -201,7 +203,9 @@ impl Symbol {
     pub fn parse<'a>(bytes: &'a [u8], offset: usize) -> error::Result<(Option<&'a str>, Symbol)> {
         let symbol = bytes.pread::<Symbol>(offset)?;
         let name = if symbol.name[0] != 0 {
-            bytes[offset..][..8].pread(0).ok()
+            bytes
+                .pread_with(offset, ctx::StrCtx::DelimiterUntil(0, 8))
+                .ok()
         } else {
             None
         };
@@ -214,11 +218,8 @@ impl Symbol {
     /// a strtab entry.
     pub fn name<'a>(&'a self, strtab: &'a strtab::Strtab) -> error::Result<&'a str> {
         if let Some(offset) = self.name_offset() {
-            strtab.get(offset as usize).unwrap_or_else(|| {
-                Err(error::Error::Malformed(format!(
-                    "Invalid Symbol name offset {:#x}",
-                    offset
-                )))
+            strtab.get_at(offset as usize).ok_or_else(|| {
+                error::Error::Malformed(format!("Invalid Symbol name offset {:#x}", offset))
             })
         } else {
             Ok(self.name.pread(0)?)
@@ -236,6 +237,12 @@ impl Symbol {
         }
     }
 
+    /// Set the strtab offset of the symbol name.
+    pub fn set_name_offset(&mut self, offset: u32) {
+        self.name[..4].copy_from_slice(&[0; 4]);
+        self.name.pwrite_with(offset, 4, scroll::LE).unwrap();
+    }
+
     /// Return the base type of the symbol.
     ///
     /// This type uses the `IMAGE_SYM_TYPE_*` definitions.
@@ -249,6 +256,153 @@ impl Symbol {
     pub fn derived_type(&self) -> u16 {
         self.typ >> IMAGE_SYM_DTYPE_SHIFT
     }
+
+    /// Return true for function definitions.
+    ///
+    /// These symbols use `AuxFunctionDefinition` for auxiliary symbol records.
+    pub fn is_function_definition(&self) -> bool {
+        self.storage_class == IMAGE_SYM_CLASS_EXTERNAL
+            && self.derived_type() == IMAGE_SYM_DTYPE_FUNCTION
+            && self.section_number > 0
+    }
+
+    /// Return true for weak external symbols.
+    ///
+    /// These symbols use `AuxWeakExternal` for auxiliary symbol records.
+    pub fn is_weak_external(&self) -> bool {
+        self.storage_class == IMAGE_SYM_CLASS_WEAK_EXTERNAL
+    }
+
+    /// Return true for file symbol records.
+    ///
+    /// The auxiliary records contain the name of the source code file.
+    pub fn is_file(&self) -> bool {
+        self.storage_class == IMAGE_SYM_CLASS_FILE
+    }
+
+    /// Return true for section definitions.
+    ///
+    /// These symbols use `AuxSectionDefinition` for auxiliary symbol records.
+    pub fn is_section_definition(&self) -> bool {
+        self.storage_class == IMAGE_SYM_CLASS_STATIC && self.number_of_aux_symbols > 0
+    }
+}
+
+/// Auxiliary symbol record for function definitions.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Default, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct AuxFunctionDefinition {
+    /// The symbol-table index of the corresponding `.bf` (begin function) symbol record.
+    pub tag_index: u32,
+    /// The size of the executable code for the function itself.
+    ///
+    /// If the function is in its own section, the `size_of_raw_data` in the section header
+    /// is greater or equal to this field, depending on alignment considerations.
+    pub total_size: u32,
+    /// The file offset of the first COFF line-number entry for the function,
+    /// or zero if none exists.
+    pub pointer_to_line_number: u32,
+    /// The symbol-table index of the record for the next function.
+    ///
+    /// If the function is the last in the symbol table, this field is set to zero.
+    pub pointer_to_next_function: u32,
+    /// Unused padding.
+    pub unused: [u8; 2],
+}
+
+/// Auxiliary symbol record for symbols with storage class `IMAGE_SYM_CLASS_FUNCTION`.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Default, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct AuxBeginAndEndFunction {
+    /// Unused padding.
+    pub unused1: [u8; 4],
+    /// The actual ordinal line number within the source file, corresponding
+    /// to the `.bf` or `.ef` record.
+    pub line_number: u16,
+    /// Unused padding.
+    pub unused2: [u8; 6],
+    /// The symbol-table index of the next `.bf` symbol record.
+    ///
+    /// If the function is the last in the symbol table, this field is set to zero.
+    /// It is not used for `.ef` records.
+    pub pointer_to_next_function: u32,
+    /// Unused padding.
+    pub unused3: [u8; 2],
+}
+
+// Values for the `characteristics` field of `AuxWeakExternal`.
+
+/// Indicates that no library search for the symbol should be performed.
+pub const IMAGE_WEAK_EXTERN_SEARCH_NOLIBRARY: u32 = 1;
+/// Indicates that a library search for the symbol should be performed.
+pub const IMAGE_WEAK_EXTERN_SEARCH_LIBRARY: u32 = 2;
+/// Indicates that the symbol is an alias for the symbol given by the `tag_index` field.
+pub const IMAGE_WEAK_EXTERN_SEARCH_ALIAS: u32 = 3;
+
+/// Auxiliary symbol record for weak external symbols.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Default, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct AuxWeakExternal {
+    /// The symbol-table index of the symbol to be linked if an external definition is not found.
+    pub tag_index: u32,
+    /// Flags that control how the symbol should be linked.
+    pub characteristics: u32,
+    /// Unused padding.
+    pub unused: [u8; 10],
+}
+
+// Values for the `selection` field of `AuxSectionDefinition`.
+
+/// If this symbol is already defined, the linker issues a "multiply defined symbol" error.
+pub const IMAGE_COMDAT_SELECT_NODUPLICATES: u8 = 1;
+/// Any section that defines the same COMDAT symbol can be linked; the rest are removed.
+pub const IMAGE_COMDAT_SELECT_ANY: u8 = 2;
+/// The linker chooses an arbitrary section among the definitions for this symbol.
+///
+/// If all definitions are not the same size, a "multiply defined symbol" error is issued.
+pub const IMAGE_COMDAT_SELECT_SAME_SIZE: u8 = 3;
+/// The linker chooses an arbitrary section among the definitions for this symbol.
+///
+/// If all definitions do not match exactly, a "multiply defined symbol" error is issued.
+pub const IMAGE_COMDAT_SELECT_EXACT_MATCH: u8 = 4;
+/// The section is linked if a certain other COMDAT section is linked.
+///
+/// This other section is indicated by the `number` field of the auxiliary symbol record
+/// for the section definition. This setting is useful for definitions that have components
+/// in multiple sections (for example, code in one and data in another), but where all must
+/// be linked or discarded as a set. The other section with which this section is associated
+/// must be a COMDAT section; it cannot be another associative COMDAT section (that is, the
+/// other section cannot have `IMAGE_COMDAT_SELECT_ASSOCIATIVE` set).
+pub const IMAGE_COMDAT_SELECT_ASSOCIATIVE: u8 = 5;
+/// The linker chooses the largest definition from among all of the definitions for this symbol.
+///
+/// If multiple definitions have this size, the choice between them is arbitrary.
+pub const IMAGE_COMDAT_SELECT_LARGEST: u8 = 6;
+
+/// Auxiliary symbol record for section definitions.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Default, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct AuxSectionDefinition {
+    /// The size of section data; the same as `size_of_raw_data` in the section header.
+    pub length: u32,
+    /// The number of relocation entries for the section.
+    pub number_of_relocations: u16,
+    /// The number of line-number entries for the section.
+    pub number_of_line_numbers: u16,
+    /// The checksum for communal data.
+    ///
+    /// It is applicable if the `IMAGE_SCN_LNK_COMDAT` flag is set in the section header.
+    pub checksum: u32,
+    /// One-based index into the section table for the associated section.
+    ///
+    /// This is used when the `selection` field is `IMAGE_COMDAT_SELECT_ASSOCIATIVE`.
+    pub number: u16,
+    /// The COMDAT selection number.
+    ///
+    /// This is applicable if the section is a COMDAT section.
+    pub selection: u8,
+    /// Unused padding.
+    pub unused: [u8; 3],
 }
 
 /// A COFF symbol table.
@@ -277,6 +431,39 @@ impl<'a> SymbolTable<'a> {
     pub fn get(&self, index: usize) -> Option<(Option<&'a str>, Symbol)> {
         let offset = index * COFF_SYMBOL_SIZE;
         Symbol::parse(self.symbols, offset).ok()
+    }
+
+    /// Get the auxiliary symbol record for a function definition.
+    pub fn aux_function_definition(&self, index: usize) -> Option<AuxFunctionDefinition> {
+        let offset = index * COFF_SYMBOL_SIZE;
+        self.symbols.pread(offset).ok()
+    }
+
+    /// Get the auxiliary symbol record for a `.bf` or `.ef` symbol record.
+    pub fn aux_begin_and_end_function(&self, index: usize) -> Option<AuxBeginAndEndFunction> {
+        let offset = index * COFF_SYMBOL_SIZE;
+        self.symbols.pread(offset).ok()
+    }
+
+    /// Get the auxiliary symbol record for a weak external.
+    pub fn aux_weak_external(&self, index: usize) -> Option<AuxWeakExternal> {
+        let offset = index * COFF_SYMBOL_SIZE;
+        self.symbols.pread(offset).ok()
+    }
+
+    /// Get the file name from the auxiliary symbol record for a file symbol record.
+    pub fn aux_file(&self, index: usize, number: usize) -> Option<&'a str> {
+        let offset = index * COFF_SYMBOL_SIZE;
+        let length = number * COFF_SYMBOL_SIZE;
+        self.symbols
+            .pread_with(offset, ctx::StrCtx::DelimiterUntil(0, length))
+            .ok()
+    }
+
+    /// Get the auxiliary symbol record for a section definition.
+    pub fn aux_section_definition(&self, index: usize) -> Option<AuxSectionDefinition> {
+        let offset = index * COFF_SYMBOL_SIZE;
+        self.symbols.pread(offset).ok()
     }
 
     /// Return an iterator for the COFF symbols.

@@ -1,9 +1,12 @@
-# libgoblin [![Build status][travis-badge]][travis-url] [![crates.io version][crates-goblin-badge]][crates-goblin]
+# libgoblin
+
+[![Actions][actions-badge]][actions-url]
+[![crates.io version][crates-goblin-badge]][crates-goblin]
 
 <!-- Badges' links -->
 
-[travis-badge]: https://travis-ci.org/m4b/goblin.svg?branch=master
-[travis-url]: https://travis-ci.org/m4b/goblin
+[actions-badge]: https://github.com/m4b/goblin/workflows/CI/badge.svg?branch=master
+[actions-url]: https://github.com/m4b/goblin/actions
 [crates-goblin-badge]: https://img.shields.io/crates/v/goblin.svg
 [crates-goblin]: https://crates.io/crates/goblin
 
@@ -17,13 +20,13 @@ https://docs.rs/goblin/
 
 ### Usage
 
-Goblin requires `rustc` 1.31.1.
+Goblin requires `rustc` 1.40.0.
 
 Add to your `Cargo.toml`
 
 ```toml
 [dependencies]
-goblin = "0.0.22"
+goblin = "0.4"
 ```
 
 ### Features
@@ -71,6 +74,8 @@ Here are some things you could do with this crate (or help to implement so they 
 
 <!-- Related projects  -->
 
+[occlum]: https://github.com/occlum/occlum
+[memflow]: https://github.com/memflow/memflow
 [cargo-sym]: https://github.com/m4b/cargo-sym
 [bingrep]: https://github.com/m4b/bingrep
 [faerie]: https://github.com/m4b/faerie
@@ -99,60 +104,109 @@ Here are some things you could do with this crate (or help to implement so they 
 
 Thank you all :heart: !
 
-In alphabetic order:
+In lexicographic order:
 
+- [@2vg]
 - [@amanieu]
+- [@burjui]
+- [@connorkuehl]
+- [@dancrossnyc]
+- [@ExPixel]
+- [@Evian-Zhang]
 - [@flanfly]
+- [@glandium]
 - [@ibabushkin]
+- [@jackcmay]
 - [@jan-auer]
+- [@jessehui]
 - [@jdub]
 - [@jrmuizel]
+- [@jsgf]
+- [@keith]
 - [@kjempelodott]
+- [@ko1n]
 - [@le-jzr]
+- [@Lichtso]
 - [@lion128]
 - [@llogiq]
 - [@lzutao]
+- [@lzybkr]
+- [@m4b]
+- [@messense]
 - [@mitsuhiko]
 - [@mre]
+- [@Mrmaxmeier]
+- [@nico-abram]
 - [@pchickey]
 - [@philipc]
 - [@Pzixel]
+- [@quake]
+- [@raindev]
 - [@rocallahan]
 - [@sanxiyn]
+- [@sollyucko]
 - [@tathanhdinh]
 - [@Techno-coder]
 - [@ticki]
+- [@Timmmm]
+- [@Tiwalun]
 - [@wickerwacka]
 - [@willglynn]
+- [@woodruffw]
+- [@wyxloading]
 - [@xcoldhandsx]
 
 <!-- Contributors -->
 
-[@m4b]: https://github.com/m4b
+[@2vg]: https://github.com/2vg
 [@amanieu]: https://github.com/amanieu
+[@burjui]: https://github.com/burjui
+[@connorkuehl]: https://github.com/connorkuehl
+[@dancrossnyc]: https://github.com/dancrossnyc
+[@Evian-Zhang]: https://github.com/Evian-Zhang
+[@ExPixel]: https://github.com/ExPixel
 [@flanfly]: https://github.com/flanfly
+[@glandium]: https://github.com/glandium
 [@ibabushkin]: https://github.com/ibabushkin
+[@jackcmay]: https://github.com/jackcmay
 [@jan-auer]: https://github.com/jan-auer
+[@jessehui]: https://github.com/jessehui
 [@jdub]: https://github.com/jdub
 [@jrmuizel]: https://github.com/jrmuizel
+[@jsgf]: https://github.com/jsgf
+[@keith]: https://github.com/keith
 [@kjempelodott]: https://github.com/kjempelodott
+[@ko1N]: https://github.com/ko1N
 [@le-jzr]: https://github.com/le-jzr
+[@Lichtso]: https://github.com/Lichtso
 [@lion128]: https://github.com/lion128
 [@llogiq]: https://github.com/llogiq
+[@lzutao]: https://github.com/lzutao
+[@lzybkr]: https://github.com/lzybkr
+[@m4b]: https://github.com/m4b
+[@messense]: https://github.com/messense
 [@mitsuhiko]: https://github.com/mitsuhiko
 [@mre]: https://github.com/mre
+[@Mrmaxmeier]: https://github.com/Mrmaxmeier
+[@nico-abram]: https://github.com/nico-abram
 [@pchickey]: https://github.com/pchickey
 [@philipc]: https://github.com/philipc
 [@Pzixel]: https://github.com/Pzixel
+[@quake]: https://github.com/quake
+[@raindev]: https://github.com/raindev
 [@rocallahan]: https://github.com/rocallahan
 [@sanxiyn]: https://github.com/sanxiyn
+[@sollyucko]: https://github.com/sollyucko
 [@tathanhdinh]: https://github.com/tathanhdinh
 [@Techno-coder]: https://github.com/Techno-coder
 [@ticki]: https://github.com/ticki
-[@willglynn]: https://github.com/willglynn
-[@xcoldhandsx]: https://github.com/xcoldhandsx
-[@lzutao]: https://github.com/lzutao
+[@Timmmm]: https://github.com/Timmmm
+[@Tiwalun]: https://github.com/Tiwalun
 [@wickerwacka]: https://github.com/wickerwaka
+[@willglynn]: https://github.com/willglynn
+[@woodruffw]: https://github.com/woodruffw
+[@wyxloading]: https://github.com/wyxloading
+[@xcoldhandsx]: https://github.com/xcoldhandsx
 
 ## Contributing
 

@@ -3,22 +3,24 @@
 
 // TODO: panics with unwrap on None for apisetschema.dll, fhuxgraphics.dll and some others
 
-use crate::alloc::vec::Vec;
+use alloc::vec::Vec;
 
-pub mod header;
-pub mod optional_header;
 pub mod characteristic;
-pub mod section_table;
 pub mod data_directories;
-pub mod export;
-pub mod import;
 pub mod debug;
 pub mod exception;
+pub mod export;
+pub mod header;
+pub mod import;
+pub mod optional_header;
+pub mod options;
+pub mod relocation;
+pub mod section_table;
 pub mod symbol;
 pub mod utils;
 
-use crate::error;
 use crate::container;
+use crate::error;
 use crate::strtab;
 
 use log::debug;
@@ -61,9 +63,17 @@ pub struct PE<'a> {
 impl<'a> PE<'a> {
     /// Reads a PE binary from the underlying `bytes`
     pub fn parse(bytes: &'a [u8]) -> error::Result<Self> {
+        Self::parse_with_opts(bytes, &options::ParseOptions::default())
+    }
+
+    /// Reads a PE binary from the underlying `bytes`
+    pub fn parse_with_opts(bytes: &'a [u8], opts: &options::ParseOptions) -> error::Result<Self> {
         let header = header::Header::parse(bytes)?;
         debug!("{:#?}", header);
-        let offset = &mut (header.dos_header.pe_pointer as usize + header::SIZEOF_COFF_HEADER + header.coff_header.size_of_optional_header as usize);
+        let offset = &mut (header.dos_header.pe_pointer as usize
+            + header::SIZEOF_PE_MAGIC
+            + header::SIZEOF_COFF_HEADER
+            + header.coff_header.size_of_optional_header as usize);
         let sections = header.coff_header.sections(bytes, offset)?;
         let is_lib = characteristic::is_dll(header.coff_header.characteristics);
         let mut entry = 0;
@@ -81,12 +91,27 @@ impl<'a> PE<'a> {
             entry = optional_header.standard_fields.address_of_entry_point as usize;
             image_base = optional_header.windows_fields.image_base as usize;
             is_64 = optional_header.container()? == container::Container::Big;
-            debug!("entry {:#x} image_base {:#x} is_64: {}", entry, image_base, is_64);
+            debug!(
+                "entry {:#x} image_base {:#x} is_64: {}",
+                entry, image_base, is_64
+            );
             let file_alignment = optional_header.windows_fields.file_alignment;
             if let Some(export_table) = *optional_header.data_directories.get_export_table() {
-                if let Ok(ed) = export::ExportData::parse(bytes, export_table, &sections, file_alignment) {
+                if let Ok(ed) = export::ExportData::parse_with_opts(
+                    bytes,
+                    export_table,
+                    &sections,
+                    file_alignment,
+                    opts,
+                ) {
                     debug!("export data {:#?}", ed);
-                    exports = export::Export::parse(bytes, &ed, &sections, file_alignment)?;
+                    exports = export::Export::parse_with_opts(
+                        bytes,
+                        &ed,
+                        &sections,
+                        file_alignment,
+                        opts,
+                    )?;
                     name = ed.name;
                     debug!("name: {:#?}", name);
                     export_data = Some(ed);
@@ -95,9 +120,21 @@ impl<'a> PE<'a> {
             debug!("exports: {:#?}", exports);
             if let Some(import_table) = *optional_header.data_directories.get_import_table() {
                 let id = if is_64 {
-                    import::ImportData::parse::<u64>(bytes, import_table, &sections, file_alignment)?
+                    import::ImportData::parse_with_opts::<u64>(
+                        bytes,
+                        import_table,
+                        &sections,
+                        file_alignment,
+                        opts,
+                    )?
                 } else {
-                    import::ImportData::parse::<u32>(bytes, import_table, &sections, file_alignment)?
+                    import::ImportData::parse_with_opts::<u32>(
+                        bytes,
+                        import_table,
+                        &sections,
+                        file_alignment,
+                        opts,
+                    )?
                 };
                 debug!("import data {:#?}", id);
                 if is_64 {
@@ -105,22 +142,43 @@ impl<'a> PE<'a> {
                 } else {
                     imports = import::Import::parse::<u32>(bytes, &id, &sections)?
                 }
-                libraries = id.import_data.iter().map( | data | { data.name }).collect::<Vec<&'a str>>();
+                libraries = id
+                    .import_data
+                    .iter()
+                    .map(|data| data.name)
+                    .collect::<Vec<&'a str>>();
                 libraries.sort();
                 libraries.dedup();
                 import_data = Some(id);
             }
             debug!("imports: {:#?}", imports);
             if let Some(debug_table) = *optional_header.data_directories.get_debug_table() {
-                debug_data = Some(debug::DebugData::parse(bytes, debug_table, &sections, file_alignment)?);
+                debug_data = Some(debug::DebugData::parse_with_opts(
+                    bytes,
+                    debug_table,
+                    &sections,
+                    file_alignment,
+                    opts,
+                )?);
             }
 
-            debug!("exception data: {:#?}", exception_data);
-            if let Some(exception_table) = *optional_header.data_directories.get_exception_table() {
-                exception_data = Some(exception::ExceptionData::parse(bytes, exception_table, &sections, file_alignment)?);
+            if header.coff_header.machine == header::COFF_MACHINE_X86_64 {
+                // currently only x86_64 is supported
+                debug!("exception data: {:#?}", exception_data);
+                if let Some(exception_table) =
+                    *optional_header.data_directories.get_exception_table()
+                {
+                    exception_data = Some(exception::ExceptionData::parse_with_opts(
+                        bytes,
+                        exception_table,
+                        &sections,
+                        file_alignment,
+                        opts,
+                    )?);
+                }
             }
         }
-        Ok( PE {
+        Ok(PE {
             header,
             sections,
             size: 0,
@@ -159,9 +217,16 @@ impl<'a> Coff<'a> {
         let offset = &mut 0;
         let header = header::CoffHeader::parse(bytes, offset)?;
         debug!("{:#?}", header);
+        // TODO: maybe parse optional header, but it isn't present for Windows.
+        *offset += header.size_of_optional_header as usize;
         let sections = header.sections(bytes, offset)?;
         let symbols = header.symbols(bytes)?;
         let strings = header.strings(bytes)?;
-        Ok(Coff { header, sections, symbols, strings })
+        Ok(Coff {
+            header,
+            sections,
+            symbols,
+            strings,
+        })
     }
 }
