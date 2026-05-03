@@ -403,7 +403,6 @@ if_alloc! {
     pub struct Dynamic {
         pub dyns: Vec<Dyn>,
         pub info: DynamicInfo,
-        count: usize,
     }
 
     impl Dynamic {
@@ -427,6 +426,7 @@ if_alloc! {
                         &[]
                     };
                     let size = Dyn::size_with(&ctx);
+                    // the validity of `count` was implicitly checked by reading `bytes`.
                     let count = filesz / size;
                     let mut dyns = Vec::with_capacity(count);
                     let mut offset = 0;
@@ -440,8 +440,7 @@ if_alloc! {
                     for dynamic in &dyns {
                         info.update(phdrs, dynamic);
                     }
-                    let count = dyns.len();
-                    return Ok(Some(Dynamic { dyns: dyns, info: info, count: count }));
+                    return Ok(Some(Dynamic { dyns: dyns, info: info, }));
                 }
             }
             Ok(None)
@@ -449,7 +448,7 @@ if_alloc! {
 
         pub fn get_libraries<'a>(&self, strtab: &Strtab<'a>) -> Vec<&'a str> {
             use log::warn;
-            let count = self.info.needed_count;
+            let count = self.info.needed_count.min(self.dyns.len());
             let mut needed = Vec::with_capacity(count);
             for dynamic in &self.dyns {
                 if dynamic.d_tag as u64 == DT_NEEDED {
@@ -541,19 +540,19 @@ macro_rules! elf_dyn_std_impl {
             }
 
             /// Given a bias and a memory address (typically for a _correctly_ mmap'd binary in memory), returns the `_DYNAMIC` array as a slice of that memory
-            pub unsafe fn from_raw<'a>(bias: usize, vaddr: usize) -> &'a [Dyn] {
+            pub unsafe fn from_raw<'a>(bias: usize, vaddr: usize) -> &'a [Dyn] { unsafe {
                 let dynp = vaddr.wrapping_add(bias) as *const Dyn;
                 let mut idx = 0;
                 while u64::from((*dynp.offset(idx)).d_tag) != DT_NULL {
                     idx += 1;
                 }
                 slice::from_raw_parts(dynp, idx as usize)
-            }
+            }}
 
             // TODO: these bare functions have always seemed awkward, but not sure where they should go...
-            /// Maybe gets and returns the dynamic array with the same lifetime as the [phdrs], using the provided bias with wrapping addition.
+            /// Maybe gets and returns the dynamic array with the same lifetime as the `phdrs`, using the provided bias with wrapping addition.
             /// If the bias is wrong, it will either segfault or give you incorrect values, beware
-            pub unsafe fn from_phdrs(bias: usize, phdrs: &[$phdr]) -> Option<&[Dyn]> {
+            pub unsafe fn from_phdrs(bias: usize, phdrs: &[$phdr]) -> Option<&[Dyn]> { unsafe {
                 for phdr in phdrs {
                     // FIXME: change to casting to u64 similar to DT_*?
                     if phdr.p_type as u32 == PT_DYNAMIC {
@@ -561,19 +560,19 @@ macro_rules! elf_dyn_std_impl {
                     }
                 }
                 None
-            }
+            }}
 
             /// Gets the needed libraries from the `_DYNAMIC` array, with the str slices lifetime tied to the dynamic array/strtab's lifetime(s)
-            pub unsafe fn get_needed<'a>(dyns: &[Dyn], strtab: *const Strtab<'a>, count: usize) -> Vec<&'a str> {
-                let mut needed = Vec::with_capacity(count);
+            pub unsafe fn get_needed<'a>(dyns: &[Dyn], strtab: *const Strtab<'a>, count: usize) -> Vec<&'a str> { unsafe {
+                let mut needed = Vec::with_capacity(count.min(dyns.len()));
                 for dynamic in dyns {
                     if u64::from(dynamic.d_tag) == DT_NEEDED {
-                        let lib = &(*strtab)[dynamic.d_val as usize];
+                        let lib = &(&(*strtab))[dynamic.d_val as usize];
                         needed.push(lib);
                     }
                 }
                 needed
-            }
+            }}
         }
     };
 }
@@ -583,7 +582,7 @@ macro_rules! elf_dynamic_info_std_impl {
         /// Convert a virtual memory address to a file offset
         fn vm_to_offset(phdrs: &[$phdr], address: $size) -> Option<$size> {
             for ph in phdrs {
-                if address >= ph.p_vaddr {
+                if ph.p_type == crate::elf::program_header::PT_LOAD && address >= ph.p_vaddr {
                     let offset = address - ph.p_vaddr;
                     if offset < ph.p_memsz {
                         return ph.p_offset.checked_add(offset);
@@ -614,6 +613,8 @@ macro_rules! elf_dynamic_info_std_impl {
             pub pltrelsz: usize,
             pub pltrel: $size,
             pub jmprel: usize,
+            pub verdef: $size,
+            pub verdefnum: $size,
             pub verneed: $size,
             pub verneednum: $size,
             pub versym: $size,
@@ -658,6 +659,8 @@ macro_rules! elf_dynamic_info_std_impl {
                     DT_JMPREL => {
                         self.jmprel = vm_to_offset(phdrs, dynamic.d_val).unwrap_or(0) as usize
                     } // .rela.plt
+                    DT_VERDEF => self.verdef = vm_to_offset(phdrs, dynamic.d_val).unwrap_or(0),
+                    DT_VERDEFNUM => self.verdefnum = vm_to_offset(phdrs, dynamic.d_val).unwrap_or(0),
                     DT_VERNEED => self.verneed = vm_to_offset(phdrs, dynamic.d_val).unwrap_or(0),
                     DT_VERNEEDNUM => self.verneednum = dynamic.d_val as _,
                     DT_VERSYM => self.versym = vm_to_offset(phdrs, dynamic.d_val).unwrap_or(0),
@@ -750,6 +753,8 @@ macro_rules! elf_dynamic_info_std_impl {
                         .field("pltrelsz", &self.pltrelsz)
                         .field("pltrel", &self.pltrel)
                         .field("jmprel", &format_args!("0x{:x}", self.jmprel))
+                        .field("verdef", &format_args!("0x{:x}", self.verdef))
+                        .field("verdefnum", &self.verdefnum)
                         .field("verneed", &format_args!("0x{:x}", self.verneed))
                         .field("verneednum", &self.verneednum)
                         .field("versym", &format_args!("0x{:x}", self.versym))

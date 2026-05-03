@@ -4,9 +4,10 @@
 use core::fmt;
 use core::ops::Index;
 use core::str;
-use scroll::{ctx, Pread};
+use scroll::{Pread, ctx};
 if_alloc! {
     use crate::error;
+    use crate::options::Permissive;
     use alloc::vec::Vec;
 }
 
@@ -25,13 +26,31 @@ fn get_str(offset: usize, bytes: &[u8], delim: ctx::StrCtx) -> scroll::Result<&s
     bytes.pread_with::<&str>(offset, delim)
 }
 
+#[inline(always)]
+#[cfg(feature = "alloc")]
+fn get_str_with_opts(
+    offset: usize,
+    bytes: &[u8],
+    delim: ctx::StrCtx,
+    permissive: bool,
+) -> scroll::Result<&str> {
+    bytes
+        .pread_with::<&str>(offset, delim)
+        .or_permissive_and_default(permissive, "Invalid UTF-8 in string table")
+}
+
 impl<'a> Strtab<'a> {
     /// Creates a `Strtab` with `bytes` as the backing string table, using `delim` as the delimiter between entries.
     ///
     /// NB: this does *not* preparse the string table, which can have non-optimal access patterns.
-    /// See https://github.com/m4b/goblin/pull/275#issue-660364025
+    /// See <https://github.com/m4b/goblin/pull/275>
     pub fn new(bytes: &'a [u8], delim: u8) -> Self {
         Self::from_slice_unparsed(bytes, 0, bytes.len(), delim)
+    }
+
+    /// Returns the length of this `Strtab` in bytes
+    pub fn len(&self) -> usize {
+        self.bytes.len()
     }
 
     /// Creates a `Strtab` directly without bounds check and without parsing it.
@@ -62,20 +81,94 @@ impl<'a> Strtab<'a> {
     /// Errors if bytes are invalid UTF-8.
     /// Requires `feature = "alloc"`
     pub fn parse(bytes: &'a [u8], offset: usize, len: usize, delim: u8) -> error::Result<Self> {
+        Self::parse_with_opts(
+            bytes,
+            offset,
+            len,
+            delim,
+            &crate::options::ParseOptions::default(),
+        )
+    }
+
+    #[cfg(feature = "alloc")]
+    /// Parses a `Strtab` from `bytes` at `offset` with `len` size as the backing string table, using `delim` as the delimiter.
+    /// With options for permissive parsing.
+    ///
+    /// Errors if bytes are invalid UTF-8.
+    /// Requires `feature = "alloc"`
+    pub(crate) fn parse_with_opts(
+        bytes: &'a [u8],
+        offset: usize,
+        len: usize,
+        delim: u8,
+        opts: &crate::options::ParseOptions,
+    ) -> error::Result<Self> {
         let (end, overflow) = offset.overflowing_add(len);
-        if overflow || end > bytes.len() {
+
+        // For COFF with an empty string table, len is zero and offset is equal to bytes.len().
+        // In this case an empty slice is returned.
+        // ELF has explicit checks for string tables with sh_size of zero.
+
+        // Handle completely invalid offset
+        if offset > bytes.len() {
+            #[cfg(feature = "alloc")]
             return Err(error::Error::Malformed(format!(
+                "String table offset ({}) is beyond file boundary ({})",
+                offset,
+                bytes.len()
+            )))
+            .or_permissive_and_value(
+                opts.parse_mode.is_permissive(),
+                "String table offset is beyond file boundary, returning empty string table",
+                Self {
+                    delim: ctx::StrCtx::Delimiter(delim),
+                    bytes: &[],
+                    strings: Vec::new(),
+                },
+            );
+            #[cfg(not(feature = "alloc"))]
+            return Err(scroll::Error::BadOffset(offset).into()).or_permissive_and_value(
+                opts.parse_mode.is_permissive(),
+                "String table offset is beyond file boundary",
+                Self {
+                    delim: ctx::StrCtx::Delimiter(delim),
+                    bytes: &[],
+                },
+            );
+        }
+
+        // Check for overflow or out of bounds
+        let actual_len = if overflow || end > bytes.len() {
+            #[cfg(feature = "alloc")]
+            let err = Err(error::Error::Malformed(format!(
                 "Strtable size ({}) + offset ({}) is out of bounds for {} #bytes. Overflowed: {}",
                 len,
                 offset,
                 bytes.len(),
                 overflow
             )));
-        }
-        let mut result = Self::from_slice_unparsed(bytes, offset, len, delim);
+            #[cfg(not(feature = "alloc"))]
+            let err = Err(scroll::Error::BadOffset(offset).into());
+
+            err.or_permissive_and_then(
+                opts.parse_mode.is_permissive(),
+                "String table extends beyond file boundary, truncating",
+                || bytes.len() - offset,
+            )?
+        } else {
+            len
+        };
+
+        let mut result = Self::from_slice_unparsed(bytes, offset, actual_len, delim);
+
         let mut i = 0;
         while i < result.bytes.len() {
-            let string = get_str(i, result.bytes, result.delim)?;
+            let string = get_str_with_opts(
+                i,
+                result.bytes,
+                result.delim,
+                opts.parse_mode.is_permissive(),
+            )?;
             result.strings.push((i, string));
             i += string.len() + 1;
         }
@@ -90,6 +183,24 @@ impl<'a> Strtab<'a> {
     }
     #[cfg(feature = "alloc")]
     /// Converts the string table to a vector of parsed strings.
+    ///
+    /// Note: This method is used to check the parsed contents of `strtab`.
+    /// If you want to get the correct contents of `strtab` as `Vec`, use the following example.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use goblin::error::Error;
+    ///
+    /// pub fn show_shdr_strtab(bytes: &[u8]) -> Result<(), Error> {
+    ///     let elf = goblin::elf::Elf::parse(&bytes)?;
+    ///
+    ///     for section in elf.section_headers {
+    ///         println!("{}", elf.shdr_strtab.get_at(section.sh_name).unwrap_or(""));
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     ///
     /// Requires `feature = "alloc"`
     pub fn to_vec(&self) -> error::Result<Vec<&'a str>> {
@@ -132,7 +243,7 @@ impl<'a> Strtab<'a> {
     /// # Safety
     /// This function creates a `Strtab` directly from a raw pointer and size
     pub unsafe fn from_raw(ptr: *const u8, len: usize, delim: u8) -> Strtab<'a> {
-        Self::from_slice_unparsed(core::slice::from_raw_parts(ptr, len), 0, len, delim)
+        unsafe { Self::from_slice_unparsed(core::slice::from_raw_parts(ptr, len), 0, len, delim) }
     }
     #[deprecated(since = "0.4.2", note = "Bad performance, use get_at() instead")]
     #[cfg(feature = "alloc")]

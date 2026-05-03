@@ -108,6 +108,19 @@ impl<'a> ExportData<'a> {
         let number_of_name_pointers = export_directory_table.number_of_name_pointers as usize;
         let address_table_entries = export_directory_table.address_table_entries as usize;
 
+        if number_of_name_pointers > bytes.len() {
+            return Err(error::Error::BufferTooShort(
+                number_of_name_pointers,
+                "name pointers",
+            ));
+        }
+        if address_table_entries > bytes.len() {
+            return Err(error::Error::BufferTooShort(
+                address_table_entries,
+                "address table entries",
+            ));
+        }
+
         let export_name_pointer_table = utils::find_offset(
             export_directory_table.name_pointer_rva as usize,
             sections,
@@ -259,7 +272,7 @@ impl<'a> Reexport<'a> {
 /// An exported symbol in this binary, contains synthetic data (name offset, etc., are computed)
 pub struct Export<'a> {
     pub name: Option<&'a str>,
-    pub offset: usize,
+    pub offset: Option<usize>,
     pub rva: usize,
     pub size: usize,
     pub reexport: Option<Reexport<'a>>,
@@ -301,16 +314,7 @@ impl<'a, 'b> scroll::ctx::TryFromCtx<'a, ExportCtx<'b>> for Export<'a> {
                 match *rva {
                     ExportRVA(rva) => {
                         let rva = rva as usize;
-                        let offset = utils::find_offset_or(
-                            rva,
-                            sections,
-                            file_alignment,
-                            &opts,
-                            &format!(
-                                "cannot map RVA ({:#x}) of export ordinal {} into offset",
-                                rva, ordinal
-                            ),
-                        )?;
+                        let offset = utils::find_offset(rva, sections, file_alignment, &opts);
                         Ok((
                             Export {
                                 name,
@@ -339,7 +343,7 @@ impl<'a, 'b> scroll::ctx::TryFromCtx<'a, ExportCtx<'b>> for Export<'a> {
                         Ok((
                             Export {
                                 name,
-                                offset,
+                                offset: Some(offset),
                                 rva,
                                 reexport: Some(reexport),
                                 size: 0,

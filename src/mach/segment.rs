@@ -11,10 +11,10 @@ use core::ops::{Deref, DerefMut};
 use crate::container;
 use crate::error;
 
-use crate::mach::constants::{SECTION_TYPE, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL};
+use crate::mach::constants::{S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL, SECTION_TYPE};
 use crate::mach::load_command::{
-    Section32, Section64, SegmentCommand32, SegmentCommand64, LC_SEGMENT, LC_SEGMENT_64,
-    SIZEOF_SECTION_32, SIZEOF_SECTION_64, SIZEOF_SEGMENT_COMMAND_32, SIZEOF_SEGMENT_COMMAND_64,
+    LC_SEGMENT, LC_SEGMENT_64, SIZEOF_SECTION_32, SIZEOF_SECTION_64, SIZEOF_SEGMENT_COMMAND_32,
+    SIZEOF_SEGMENT_COMMAND_64, Section32, Section64, SegmentCommand32, SegmentCommand64,
 };
 use crate::mach::relocation::RelocationInfo;
 
@@ -467,6 +467,26 @@ impl<'a> Segment<'a> {
         offset: usize,
         ctx: container::Ctx,
     ) -> Result<Self, error::Error> {
+        Self::from_32_impl(bytes, segment, offset, ctx, false)
+    }
+
+    /// Convert the raw C 32-bit segment command to a generalized version
+    pub fn from_32_lossy(
+        bytes: &'a [u8],
+        segment: &SegmentCommand32,
+        offset: usize,
+        ctx: container::Ctx,
+    ) -> Result<Self, error::Error> {
+        Self::from_32_impl(bytes, segment, offset, ctx, true)
+    }
+
+    pub(crate) fn from_32_impl(
+        bytes: &'a [u8],
+        segment: &SegmentCommand32,
+        offset: usize,
+        ctx: container::Ctx,
+        lossy: bool,
+    ) -> Result<Self, error::Error> {
         Ok(Segment {
             cmd: segment.cmd,
             cmdsize: segment.cmdsize,
@@ -479,22 +499,47 @@ impl<'a> Segment<'a> {
             initprot: segment.initprot,
             nsects: segment.nsects,
             flags: segment.flags,
-            data: segment_data(
+            data: match segment_data(
                 bytes,
                 u64::from(segment.fileoff),
                 u64::from(segment.filesize),
-            )?,
+            ) {
+                Ok(v) => v,
+                Err(_) if lossy => &[],
+                Err(e) => return Err(e),
+            },
             offset,
             raw_data: bytes,
             ctx,
         })
     }
+
     /// Convert the raw C 64-bit segment command to a generalized version
     pub fn from_64(
         bytes: &'a [u8],
         segment: &SegmentCommand64,
         offset: usize,
         ctx: container::Ctx,
+    ) -> Result<Self, error::Error> {
+        Self::from_64_impl(bytes, segment, offset, ctx, false)
+    }
+
+    /// Convert the raw C 64-bit segment command to a generalized version
+    pub fn from_64_lossy(
+        bytes: &'a [u8],
+        segment: &SegmentCommand64,
+        offset: usize,
+        ctx: container::Ctx,
+    ) -> Result<Self, error::Error> {
+        Self::from_64_impl(bytes, segment, offset, ctx, true)
+    }
+
+    pub(crate) fn from_64_impl(
+        bytes: &'a [u8],
+        segment: &SegmentCommand64,
+        offset: usize,
+        ctx: container::Ctx,
+        lossy: bool,
     ) -> Result<Self, error::Error> {
         Ok(Segment {
             cmd: segment.cmd,
@@ -508,7 +553,11 @@ impl<'a> Segment<'a> {
             initprot: segment.initprot,
             nsects: segment.nsects,
             flags: segment.flags,
-            data: segment_data(bytes, segment.fileoff, segment.filesize)?,
+            data: match segment_data(bytes, segment.fileoff, segment.filesize) {
+                Ok(v) => v,
+                Err(_) if lossy => &[],
+                Err(e) => return Err(e),
+            },
             offset,
             raw_data: bytes,
             ctx,
@@ -520,7 +569,6 @@ impl<'a> Segment<'a> {
 /// An opaque 32/64-bit container for Mach-o segments
 pub struct Segments<'a> {
     segments: Vec<Segment<'a>>,
-    ctx: container::Ctx,
 }
 
 impl<'a> Deref for Segments<'a> {
@@ -546,10 +594,9 @@ impl<'a, 'b> IntoIterator for &'b Segments<'a> {
 
 impl<'a> Segments<'a> {
     /// Construct a new generalized segment container from this `ctx`
-    pub fn new(ctx: container::Ctx) -> Self {
+    pub fn new(_ctx: container::Ctx) -> Self {
         Segments {
             segments: Vec::new(),
-            ctx,
         }
     }
     /// Get every section from every segment

@@ -314,8 +314,8 @@ impl ctx::TryIntoCtx<container::Ctx> for Nlist {
         container::Ctx { container, le }: container::Ctx,
     ) -> Result<usize, Self::Error> {
         let size = match container {
-            Container::Little => (bytes.pwrite_with::<Nlist32>(self.into(), 0, le)?),
-            Container::Big => (bytes.pwrite_with::<Nlist64>(self.into(), 0, le)?),
+            Container::Little => bytes.pwrite_with::<Nlist32>(self.into(), 0, le)?,
+            Container::Big => bytes.pwrite_with::<Nlist64>(self.into(), 0, le)?,
         };
         Ok(size)
     }
@@ -428,15 +428,18 @@ impl<'a> Symbols<'a> {
         ctx: container::Ctx,
     ) -> error::Result<Symbols<'a>> {
         // we need to normalize the strtab offset before we receive the truncated bytes in pread_with
-        let strtab = symtab.stroff - symtab.symoff;
-        Ok(bytes.pread_with(
+        let strtab = symtab
+            .stroff
+            .checked_sub(symtab.symoff)
+            .ok_or_else(|| error::Error::Malformed("invalid symbol table offset".into()))?;
+        bytes.pread_with(
             symtab.symoff as usize,
             SymbolsCtx {
                 nsyms: symtab.nsyms as usize,
                 strtab: strtab as usize,
                 ctx,
             },
-        )?)
+        )
     }
 
     pub fn iter(&self) -> SymbolIterator<'a> {

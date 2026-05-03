@@ -1,26 +1,19 @@
 [package]
 name = "goblin"
-version = "0.4.2"
+version = "0.10.5"
 authors = [
     "m4b <m4b.github.io@gmail.com>",
     "seu <seu@panopticon.re>",
     "Will Glynn <will@willglynn.com>",
     "Philip Craig <philipjcraig@gmail.com>",
     "Lzu Tao <taolzu@gmail.com>",
+    "Kento <hrn832@gmail.com>",
 ]
 categories = ["parsing", "development-tools::debugging"]
 documentation = "https://docs.rs/goblin"
-edition = "2018"
-include = [
-    "/etc",
-    "/src",
-    "/tests",
-    "/build.rs",
-    "/CHANGELOG.md",
-    "/Cargo.toml",
-    "/LICENSE",
-    "/README.md",
-]
+edition = "2024"
+rust-version = "1.85.0"
+include = ["src", "CHANGELOG.md", "Cargo.toml", "LICENSE", "README.md"]
 keywords = ["binary", "elf", "mach", "pe", "archive"]
 license = "MIT"
 readme = "README.md"
@@ -36,23 +29,38 @@ default-features = false
 optional = true
 
 [dependencies.scroll]
-version = "0.10"
-default_features = false
+version = "0.13"
+default-features = false
 
 [features]
-default = ["std", "elf32", "elf64", "mach32", "mach64", "pe32", "pe64", "archive", "endian_fd"]
+default = [
+    "std",
+    "elf32",
+    "elf64",
+    "mach32",
+    "mach64",
+    "pe32",
+    "pe64",
+    "te",
+    "archive",
+    "endian_fd",
+]
 std = ["alloc", "scroll/std"]
 alloc = ["scroll/derive", "log"]
 endian_fd = ["alloc"]
 elf32 = []
 elf64 = []
 # for now we will require mach and pe to be alloc + endian_fd
-mach32 = ["alloc", "endian_fd"]
-mach64 = ["alloc", "endian_fd"]
+mach32 = ["alloc", "endian_fd", "archive"]
+mach64 = ["alloc", "endian_fd", "archive"]
 pe32 = ["alloc", "endian_fd"]
 pe64 = ["alloc", "endian_fd"]
+te = ["alloc", "endian_fd"]
 archive = ["alloc"]
 
 [badges.travis-ci]
 branch = "master"
 repository = "m4b/goblin"
+
+[dev-dependencies]
+stderrlog = "0.6.0"

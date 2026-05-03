@@ -1,5 +1,7 @@
-use crate::error;
+use crate::error::{self};
+use crate::options::Permissive;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 use scroll::Pread;
 
 use super::options;
@@ -28,26 +30,50 @@ fn section_read_size(section: &section_table::SectionTable, file_alignment: u32)
         (size + PAGE_MASK) & !PAGE_MASK
     }
 
+    // Paraphrased from https://reverseengineering.stackexchange.com/a/4326 (by Peter Ferrie).
+    //
+    // Handles the corner cases such as mis-aligned pointers (round down) and sizes (round up)
+    // Further rounding corner cases:
+    // - the physical pointer should be rounded down to a multiple of 512, regardless of the value in the header
+    // - the read size is rounded up by using a combination of the file alignment and 4kb
+    // - the virtual size is always rounded up to a multiple of 4kb, regardless of the value in the header.
+    //
+    // Reference C implementation:
+    //
+    // long pointerToRaw = section.get(POINTER_TO_RAW_DATA);
+    // long alignedpointerToRaw = pointerToRaw & ~0x1ff;
+    // long sizeOfRaw = section.get(SIZE_OF_RAW_DATA);
+    // long readsize = ((pointerToRaw + sizeOfRaw) + filealign - 1) & ~(filealign - 1)) - alignedpointerToRaw;
+    // readsize = min(readsize, (sizeOfRaw + 0xfff) & ~0xfff);
+    // long virtsize = section.get(VIRTUAL_SIZE);
+    //
+    // if (virtsize)
+    // {
+    //     readsize = min(readsize, (virtsize + 0xfff) & ~0xfff);
+    // }
+
     let file_alignment = file_alignment as usize;
     let size_of_raw_data = section.size_of_raw_data as usize;
     let virtual_size = section.virtual_size as usize;
     let read_size = {
-        let read_size = (section.pointer_to_raw_data as usize + size_of_raw_data + file_alignment
-            - 1)
-            & !(file_alignment - 1);
+        let read_size =
+            ((section.pointer_to_raw_data as usize + size_of_raw_data + file_alignment - 1)
+                & !(file_alignment - 1))
+                - aligned_pointer_to_raw_data(section.pointer_to_raw_data as usize);
         cmp::min(read_size, round_size(size_of_raw_data))
     };
 
     if virtual_size == 0 {
         read_size
+    } else if read_size == 0 {
+        virtual_size
     } else {
         cmp::min(read_size, round_size(virtual_size))
     }
 }
 
 fn rva2offset(rva: usize, section: &section_table::SectionTable) -> usize {
-    (rva - section.virtual_address as usize)
-        + aligned_pointer_to_raw_data(section.pointer_to_raw_data as usize)
+    (section.pointer_to_raw_data as usize) + (rva - section.virtual_address as usize)
 }
 
 fn is_in_section(rva: usize, section: &section_table::SectionTable, file_alignment: u32) -> bool {
@@ -66,6 +92,9 @@ pub fn find_offset(
     opts: &options::ParseOptions,
 ) -> Option<usize> {
     if opts.resolve_rva {
+        if file_alignment == 0 || file_alignment & (file_alignment - 1) != 0 {
+            return None;
+        }
         for (i, section) in sections.iter().enumerate() {
             debug!(
                 "Checking {} for {:#x} ∈ {:#x}..{:#x}",
@@ -118,6 +147,56 @@ pub fn try_name<'a>(
     }
 }
 
+/// Safe version of try_name that handles packed binaries gracefully
+pub(crate) fn safe_try_name<'a>(
+    bytes: &'a [u8],
+    rva: usize,
+    sections: &[section_table::SectionTable],
+    file_alignment: u32,
+    opts: &options::ParseOptions,
+) -> error::Result<Option<&'a str>> {
+    match find_offset(rva, sections, file_alignment, opts) {
+        Some(offset) => {
+            if offset >= bytes.len() {
+                Err(error::Error::Malformed(format!(
+                    "Name RVA {:#x} maps to offset {:#x} beyond file bounds (file size: {:#x}). \
+                    This may indicate a packed binary.",
+                    rva,
+                    offset,
+                    bytes.len()
+                )))
+                .or_permissive_and_default(
+                    opts.parse_mode.is_permissive(),
+                    "Name RVA maps beyond file bounds; treating as missing",
+                )
+            } else {
+                // Try to read the string, but handle potential scroll errors gracefully
+                match bytes.pread::<&str>(offset) {
+                    Ok(name) => Ok(Some(name)),
+                    Err(e) => Err(error::Error::Malformed(format!(
+                        "Failed to read name at offset {:#x} (RVA {:#x}): {}. \
+                        This may indicate a packed binary.",
+                        offset, rva, e
+                    )))
+                    .or_permissive_and_default(
+                        opts.parse_mode.is_permissive(),
+                        "Failed to read name; treating as missing",
+                    ),
+                }
+            }
+        }
+        None => Err(error::Error::Malformed(format!(
+            "Cannot find name from rva {:#x} in sections: {:?}. \
+                This may be a packed binary or malformed sections.",
+            rva, sections
+        )))
+        .or_permissive_and_default(
+            opts.parse_mode.is_permissive(),
+            "Cannot map RVA to name; treating as missing",
+        ),
+    }
+}
+
 pub fn get_data<'a, T>(
     bytes: &'a [u8],
     sections: &[section_table::SectionTable],
@@ -151,4 +230,35 @@ where
         .ok_or_else(|| error::Error::Malformed(directory.virtual_address.to_string()))?;
     let result: T = bytes.pread_with(offset, scroll::LE)?;
     Ok(result)
+}
+
+pub(crate) fn pad(length: usize, alignment: Option<usize>) -> Option<Vec<u8>> {
+    match alignment {
+        Some(alignment) => {
+            let overhang = length % alignment;
+            if overhang != 0 {
+                let repeat = alignment - overhang;
+                Some(vec![0u8; repeat])
+            } else {
+                None
+            }
+        }
+        None => None,
+    }
+}
+
+/// Performs arbitrary alignment of values based on homogeneous numerical types.
+#[inline]
+pub(crate) fn align_up<N>(value: N, align: N) -> N
+where
+    N: core::ops::Add<Output = N>
+        + core::ops::Not<Output = N>
+        + core::ops::BitAnd<Output = N>
+        + core::ops::Sub<Output = N>
+        + core::cmp::PartialEq
+        + core::marker::Copy,
+    u8: Into<N>,
+{
+    debug_assert!(align != 0u8.into(), "Align must be non-zero");
+    (value + align - 1u8.into()) & !(align - 1u8.into())
 }

@@ -3,7 +3,7 @@
 use crate::error;
 use core::convert::TryFrom;
 use core::fmt::{self, Display};
-use scroll::{ctx, Endian};
+use scroll::{Endian, ctx};
 use scroll::{IOread, IOwrite, Pread, Pwrite, SizeWith};
 
 ///////////////////////////////////////
@@ -507,24 +507,26 @@ impl<'a> ctx::TryFromCtx<'a, Endian> for ThreadCommand {
         let flavor: u32 = bytes.pread_with(8, le)?;
         let count: u32 = bytes.pread_with(12, le)?;
 
-        // get a byte slice of the thread state
-        let thread_state_byte_length = count as usize * 4;
-        let thread_state_bytes = &bytes[16..16 + thread_state_byte_length];
-
-        // check the length
-        if thread_state_bytes.len() < thread_state_byte_length {
-            return Err(error::Error::Malformed(format!(
-                "thread command specifies {} bytes for thread state but has only {}",
-                thread_state_byte_length,
-                thread_state_bytes.len()
-            )));
-        }
         if count > 70 {
             return Err(error::Error::Malformed(format!(
                 "thread command specifies {} longs for thread state but we handle only 70",
                 count
             )));
         }
+
+        // get a byte slice of the thread state
+        let thread_state_byte_length = count as usize * 4;
+
+        // check the length
+        if bytes.len() < 16 + thread_state_byte_length {
+            return Err(error::Error::Malformed(format!(
+                "thread command specifies {} bytes for thread state but has only {}",
+                thread_state_byte_length,
+                bytes.len()
+            )));
+        }
+
+        let thread_state_bytes = &bytes[16..16 + thread_state_byte_length];
 
         // read the thread state
         let mut thread_state: [u32; 70] = [0; 70];
@@ -945,7 +947,7 @@ pub const SIZEOF_RPATH_COMMAND: usize = 12;
 /// The linkedit_data_command contains the offsets and sizes of a blob
 /// of data in the __LINKEDIT segment.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+#[derive(Default, Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
 pub struct LinkeditDataCommand {
     /// LC_CODE_SIGNATURE, LC_SEGMENT_SPLIT_INFO, LC_FUNCTION_STARTS, LC_DATA_IN_CODE,
     /// LC_DYLIB_CODE_SIGN_DRS, LC_LINKER_OPTIMIZATION_HINT, LC_DYLD_EXPORTS_TRIE, or LC_DYLD_CHAINED_FIXUPS.
@@ -1024,7 +1026,7 @@ impl TryFrom<u32> for Platform {
                 return Err(error::Error::Malformed(format!(
                     "unknown platform for load command: {:x}",
                     cmd
-                )))
+                )));
             }
         })
     }
@@ -1183,6 +1185,53 @@ pub struct EntryPointCommand {
 
 pub const SIZEOF_ENTRY_POINT_COMMAND: usize = 24;
 
+/// The build_version_command contains the min OS version on which this
+/// binary was built to run for its platform.  The list of known platforms and
+/// tool values following it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct BuildVersionCommand {
+    /// LC_BUILD_VERSION
+    pub cmd: u32,
+    pub cmdsize: u32,
+    /// platform
+    pub platform: u32,
+    /// X.Y.Z is encoded in nibbles xxxx.yy.zz
+    pub minos: u32,
+    /// X.Y.Z is encoded in nibbles xxxx.yy.zz
+    pub sdk: u32,
+    /// number of tool entries following this
+    pub ntools: u32,
+}
+
+/// Build tool version
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct BuildToolVersion {
+    /// enum for the tool
+    pub tool: u32,
+    /// version number of the tool
+    pub version: u32,
+}
+
+/// The LC_FILESET_ENTRY command is used for Mach-O filesets which contain
+/// multiple Mach-O's, such as the dyld shared cache and kernelcache
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct FilesetEntryCommand {
+    /// LC_FILSET_ENTRY
+    pub cmd: u32,
+    pub cmdsize: u32,
+    /// memory address of the dylib
+    pub vmaddr: u64,
+    /// file offset of the dylib
+    pub fileoff: u64,
+    /// contained entry id
+    pub entry_id: LcStr,
+    /// reserved
+    pub reserved: u32,
+}
+
 /// The source_version_command is an optional load command containing
 /// the version of the sources used to build the binary.
 #[repr(C)]
@@ -1207,6 +1256,22 @@ pub struct DataInCodeEntry {
     pub length: u16,
     /// a DICE_KIND_* value
     pub kind: u16,
+}
+
+/// LC_NOTE commands describe a region of arbitrary data included in a Mach-O
+/// file.  Its initial use is to record extra data in MH_CORE files.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pread, Pwrite, IOread, IOwrite, SizeWith)]
+pub struct NoteCommand {
+    /// LC_NOTE
+    pub cmd: u32,
+    pub cmdsize: u32,
+    /// owner name for this LC_NOTE
+    pub data_owner: [u8; 16],
+    /// file offset of this data
+    pub offset: u64,
+    /// length of data region
+    pub size: u64,
 }
 
 ///////////////////////////////////////
@@ -1267,6 +1332,23 @@ pub const LC_VERSION_MIN_TVOS: u32 = 0x2F;
 pub const LC_VERSION_MIN_WATCHOS: u32 = 0x30;
 pub const LC_NOTE: u32 = 0x31;
 pub const LC_BUILD_VERSION: u32 = 0x32;
+pub const LC_FILESET_ENTRY: u32 = 0x35 | LC_REQ_DYLD;
+pub const PLATFORM_MACOS: u32 = 1;
+pub const PLATFORM_IOS: u32 = 2;
+pub const PLATFORM_TVOS: u32 = 3;
+pub const PLATFORM_WATCHOS: u32 = 4;
+pub const PLATFORM_BRIDGEOS: u32 = 5;
+pub const PLATFORM_MACCATALYST: u32 = 6;
+pub const PLATFORM_IOSSIMULATOR: u32 = 7;
+pub const PLATFORM_TVOSSIMULATOR: u32 = 8;
+pub const PLATFORM_WATCHOSSIMULATOR: u32 = 9;
+pub const PLATFORM_DRIVERKIT: u32 = 10;
+pub const PLATFORM_VISIONOS: u32 = 11;
+pub const PLATFORM_VISIONOSSIMULATOR: u32 = 12;
+pub const TOOL_CLANG: u32 = 1;
+pub const TOOL_SWIFT: u32 = 2;
+pub const TOOL_LD: u32 = 3;
+pub const TOOL_LLD: u32 = 4;
 
 pub fn cmd_to_str(cmd: u32) -> &'static str {
     match cmd {
@@ -1321,6 +1403,7 @@ pub fn cmd_to_str(cmd: u32) -> &'static str {
         LC_VERSION_MIN_WATCHOS => "LC_VERSION_MIN_WATCHOS",
         LC_NOTE => "LC_NOTE",
         LC_BUILD_VERSION => "LC_BUILD_VERSION",
+        LC_FILESET_ENTRY => "LC_FILESET_ENTRY",
         LC_DYLD_EXPORTS_TRIE => "LC_DYLD_EXPORTS_TRIE",
         LC_DYLD_CHAINED_FIXUPS => "LC_DYLD_CHAINED_FIXUPS",
         _ => "LC_UNKNOWN",
@@ -1333,6 +1416,7 @@ pub fn cmd_to_str(cmd: u32) -> &'static str {
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 /// The various load commands as a cast-free variant/enum
 pub enum CommandVariant {
     Segment32(SegmentCommand32),
@@ -1378,6 +1462,8 @@ pub enum CommandVariant {
     DyldEnvironment(DylinkerCommand),
     Main(EntryPointCommand),
     DataInCode(LinkeditDataCommand),
+    BuildVersion(BuildVersionCommand),
+    FilesetEntry(FilesetEntryCommand),
     SourceVersion(SourceVersionCommand),
     DylibCodeSignDrs(LinkeditDataCommand),
     LinkerOption(LinkeditDataCommand),
@@ -1386,6 +1472,7 @@ pub enum CommandVariant {
     VersionMinWatchos(VersionMinCommand),
     DyldExportsTrie(LinkeditDataCommand),
     DyldChainedFixups(LinkeditDataCommand),
+    Note(NoteCommand),
     Unimplemented(LoadCommandHeader),
 }
 
@@ -1576,6 +1663,14 @@ impl<'a> ctx::TryFromCtx<'a, Endian> for CommandVariant {
                 let comm = bytes.pread_with::<LinkeditDataCommand>(0, le)?;
                 Ok((DataInCode(comm), size))
             }
+            LC_BUILD_VERSION => {
+                let comm = bytes.pread_with::<BuildVersionCommand>(0, le)?;
+                Ok((BuildVersion(comm), size))
+            }
+            LC_FILESET_ENTRY => {
+                let comm = bytes.pread_with::<FilesetEntryCommand>(0, le)?;
+                Ok((FilesetEntry(comm), size))
+            }
             LC_SOURCE_VERSION => {
                 let comm = bytes.pread_with::<SourceVersionCommand>(0, le)?;
                 Ok((SourceVersion(comm), size))
@@ -1608,9 +1703,11 @@ impl<'a> ctx::TryFromCtx<'a, Endian> for CommandVariant {
                 let comm = bytes.pread_with::<LinkeditDataCommand>(0, le)?;
                 Ok((DyldChainedFixups(comm), size))
             }
-            // TODO: LC_NOTE (NoteCommand) and LC_BUILD_VERSION (BuildVersionCommand)
-            // are unimplemented.
-            LC_NOTE | LC_BUILD_VERSION | _ => Ok((Unimplemented(lc), size)),
+            LC_NOTE => {
+                let comm = bytes.pread_with::<NoteCommand>(0, le)?;
+                Ok((Note(comm), size))
+            }
+            _ => Ok((Unimplemented(lc), size)),
         }
     }
 }
@@ -1662,6 +1759,8 @@ impl CommandVariant {
             DyldEnvironment(comm) => comm.cmdsize,
             Main(comm) => comm.cmdsize,
             DataInCode(comm) => comm.cmdsize,
+            BuildVersion(comm) => comm.cmdsize,
+            FilesetEntry(comm) => comm.cmdsize,
             SourceVersion(comm) => comm.cmdsize,
             DylibCodeSignDrs(comm) => comm.cmdsize,
             LinkerOption(comm) => comm.cmdsize,
@@ -1670,6 +1769,7 @@ impl CommandVariant {
             VersionMinWatchos(comm) => comm.cmdsize,
             DyldExportsTrie(comm) => comm.cmdsize,
             DyldChainedFixups(comm) => comm.cmdsize,
+            Note(comm) => comm.cmdsize,
             Unimplemented(comm) => comm.cmdsize,
         };
         cmdsize as usize
@@ -1720,6 +1820,8 @@ impl CommandVariant {
             DyldEnvironment(comm) => comm.cmd,
             Main(comm) => comm.cmd,
             DataInCode(comm) => comm.cmd,
+            BuildVersion(comm) => comm.cmd,
+            FilesetEntry(comm) => comm.cmd,
             SourceVersion(comm) => comm.cmd,
             DylibCodeSignDrs(comm) => comm.cmd,
             LinkerOption(comm) => comm.cmd,
@@ -1728,6 +1830,7 @@ impl CommandVariant {
             VersionMinWatchos(comm) => comm.cmd,
             DyldExportsTrie(comm) => comm.cmd,
             DyldChainedFixups(comm) => comm.cmd,
+            Note(comm) => comm.cmd,
             Unimplemented(comm) => comm.cmd,
         }
     }

@@ -132,11 +132,15 @@ impl<'a> Member<'a> {
             )?;
 
             // adjust the offset and size accordingly
-            *offset = header_offset + SIZEOF_HEADER + len;
-            header.size -= len;
+            if header.size > len {
+                *offset = header_offset + SIZEOF_HEADER + len;
+                header.size -= len;
 
-            // the name may have trailing NULs which we don't really want to keep
-            Some(name.trim_end_matches('\0'))
+                // the name may have trailing NULs which we don't really want to keep
+                Some(name.trim_end_matches('\0'))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -160,8 +164,8 @@ impl<'a> Member<'a> {
     fn bsd_filename_length(name: &str) -> Option<usize> {
         use core::str::FromStr;
 
-        if name.len() > 3 && &name[0..3] == "#1/" {
-            let trimmed_name = &name[3..].trim_end_matches(' ');
+        if let Some(name) = name.strip_prefix("#1/") {
+            let trimmed_name = name.trim_end_matches(' ');
             if let Ok(len) = usize::from_str(trimmed_name) {
                 Some(len)
             } else {
@@ -216,6 +220,11 @@ impl<'a> Index<'a> {
     pub fn parse_sysv_index(buffer: &'a [u8]) -> Result<Self> {
         let offset = &mut 0;
         let sizeof_table = buffer.gread_with::<u32>(offset, scroll::BE)? as usize;
+
+        if sizeof_table > buffer.len() / 4 {
+            return Err(Error::BufferTooShort(sizeof_table, "indices"));
+        }
+
         let mut indexes = Vec::with_capacity(sizeof_table);
         for _ in 0..sizeof_table {
             indexes.push(buffer.gread_with::<u32>(offset, scroll::BE)?);
@@ -270,6 +279,10 @@ impl<'a> Index<'a> {
         let strtab_bytes = buffer.pread_with::<u32>(entries_bytes + 4, scroll::LE)? as usize;
         let strtab = strtab::Strtab::parse(buffer, entries_bytes + 8, strtab_bytes, 0x0)?;
 
+        if entries_bytes > buffer.len() {
+            return Err(Error::BufferTooShort(entries, "entries"));
+        }
+
         // build the index
         let mut indexes = Vec::with_capacity(entries);
         let mut strings = Vec::with_capacity(entries);
@@ -311,15 +324,34 @@ impl<'a> Index<'a> {
     pub fn parse_windows_linker_member(buffer: &'a [u8]) -> Result<Self> {
         let offset = &mut 0;
         let members = buffer.gread_with::<u32>(offset, scroll::LE)? as usize;
+
+        if members > buffer.len() / 4 {
+            return Err(Error::BufferTooShort(members, "members"));
+        }
+
         let mut member_offsets = Vec::with_capacity(members);
         for _ in 0..members {
             member_offsets.push(buffer.gread_with::<u32>(offset, scroll::LE)?);
         }
+
         let symbols = buffer.gread_with::<u32>(offset, scroll::LE)? as usize;
+
+        if symbols > buffer.len() / 2 {
+            return Err(Error::BufferTooShort(symbols, "symbols"));
+        }
+
         let mut symbol_offsets = Vec::with_capacity(symbols);
         for _ in 0..symbols {
-            symbol_offsets
-                .push(member_offsets[buffer.gread_with::<u16>(offset, scroll::LE)? as usize - 1]);
+            let index = buffer.gread_with::<u16>(offset, scroll::LE)?;
+            // <=0 and ==0 are semantically same in unsigned integer
+            if index <= 0 {
+                return Err(Error::BufferTooShort(members, "members"));
+            }
+            if let Some(symbol_offset) = member_offsets.get(index as usize - 1) {
+                symbol_offsets.push(*symbol_offset);
+            } else {
+                return Err(Error::BufferTooShort(members, "members"));
+            }
         }
         let strtab = strtab::Strtab::parse(buffer, *offset, buffer.len() - *offset, 0x0)?;
         Ok(Index {
@@ -343,6 +375,11 @@ impl<'a> NameIndex<'a> {
         // This is a total hack, because strtab returns "" if idx == 0, need to change
         // but previous behavior might rely on this, as ELF strtab's have "" at 0th index...
         let hacked_size = size + 1;
+        if hacked_size < 2 {
+            return Err(Error::Malformed(format!(
+                "Size ({hacked_size:#x}) too small"
+            )));
+        }
         let strtab = strtab::Strtab::parse(buffer, *offset - 1, hacked_size, b'\n')?;
         // precious time was lost when refactoring because strtab::parse doesn't update the mutable seek...
         *offset += hacked_size - 2;
@@ -398,10 +435,6 @@ pub enum IndexType {
 #[derive(Debug)]
 /// An in-memory representation of a parsed Unix Archive
 pub struct Archive<'a> {
-    // we can chuck this because the symbol index is a better representation, but we keep for
-    // debugging
-    index: Index<'a>,
-    sysv_name_index: NameIndex<'a>,
     // The array of members, which are indexed by the members hash and symbol index.
     // These are in the same order they are found in the file.
     member_array: Vec<Member<'a>>,
@@ -409,8 +442,6 @@ pub struct Archive<'a> {
     members: BTreeMap<&'a str, usize>,
     // symbol -> member
     symbol_index: BTreeMap<&'a str, usize>,
-    /// Type of the symbol index that was found in the archive.
-    index_type: IndexType,
 }
 
 impl<'a> Archive<'a> {
@@ -450,12 +481,12 @@ impl<'a> Archive<'a> {
                         Index::parse_windows_linker_member(data)?
                     }
                     IndexType::BSD => {
-                        return Err(Error::Malformed("SysV index occurs after BSD index".into()))
+                        return Err(Error::Malformed("SysV index occurs after BSD index".into()));
                     }
                     IndexType::Windows => {
                         return Err(Error::Malformed(
                             "More than two Windows Linker members".into(),
-                        ))
+                        ));
                     }
                 }
             } else if member.bsd_name == Some(BSD_SYMDEF_NAME)
@@ -506,19 +537,16 @@ impl<'a> Archive<'a> {
         }
 
         Ok(Archive {
-            index,
             member_array,
-            sysv_name_index,
             members,
             symbol_index,
-            index_type,
         })
     }
 
     /// Get the member named `member` in this archive, if any. If there are
     /// multiple files in the archive with the same name it only returns one
     /// of them.
-    pub fn get(&self, member: &str) -> Option<&Member> {
+    pub fn get(&self, member: &str) -> Option<&Member<'_>> {
         if let Some(idx) = self.members.get(member) {
             Some(&self.member_array[*idx])
         } else {
@@ -527,7 +555,7 @@ impl<'a> Archive<'a> {
     }
 
     /// Get the member at position `index` in this archive, if any.
-    pub fn get_at(&self, index: usize) -> Option<&Member> {
+    pub fn get_at(&self, index: usize) -> Option<&Member<'_>> {
         self.member_array.get(index)
     }
 
@@ -550,7 +578,7 @@ impl<'a> Archive<'a> {
     }
 
     /// Gets a summary of this archive, returning a list of membername, the member, and the list of symbols the member contains
-    pub fn summarize(&self) -> Vec<(&str, &Member, Vec<&'a str>)> {
+    pub fn summarize(&self) -> Vec<(&str, &Member<'_>, Vec<&'a str>)> {
         // build a result array, with indexes matching the member indexes
         let mut result = self
             .member_array
@@ -589,6 +617,7 @@ impl<'a> Archive<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error;
 
     #[test]
     fn test_member_bsd_filename_length() {
@@ -600,6 +629,7 @@ mod tests {
         assert_eq!(Member::bsd_filename_length("#2/1"), None);
         assert_eq!(Member::bsd_filename_length(INDEX_NAME), None);
         assert_eq!(Member::bsd_filename_length(NAME_INDEX_NAME), None);
+        assert_eq!(Member::bsd_filename_length("👺"), None);
 
         // #1/<len> should be parsed as Some(len), with or without whitespace
         assert_eq!(Member::bsd_filename_length("#1/1"), Some(1));
@@ -612,5 +642,61 @@ mod tests {
         // #!/<len><trailing garbage> should be None
         assert_eq!(Member::bsd_filename_length("#1/1A"), None);
         assert_eq!(Member::bsd_filename_length("#1/1 A"), None);
+    }
+
+    /// https://github.com/m4b/goblin/issues/450
+    const MALFORMED_ARCHIVE_INDEX_TOO_SMALL: [u8; 132] = [
+        0x21, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A, 0x55, 0x52, 0x09, 0x5C, 0x09, 0x09, 0x10,
+        0x27, 0x2B, 0x09, 0x0A, 0x53, 0x54, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09,
+        0x09, 0x09, 0x09, 0x09, 0x2A, 0x29, 0x2A, 0x09, 0xF7, 0x08, 0x09, 0x09, 0x00, 0x01, 0x01,
+        0x01, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x01, 0x00, 0x31, 0x20, 0x20, 0x20,
+        0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x08, 0x2F, 0x2F, 0x20, 0x20, 0x20,
+        0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x09,
+        0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x23, 0x42, 0x21, 0x09, 0xF7, 0x08, 0x20, 0x20, 0x00,
+        0x3C, 0x20, 0x20, 0x20, 0x00, 0x20, 0x20, 0x20, 0x20, 0x09, 0x09, 0x01, 0x01, 0x30, 0x0D,
+        0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x00, 0x00, 0x27, 0x55,
+    ];
+
+    /// https://github.com/m4b/goblin/issues/450
+    const MALFORMED_ARCHIVE: [u8; 212] = [
+        0x21, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A, 0x2F, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x0F, 0x01, 0x00, 0x00, 0x31, 0x31,
+        0x31, 0x0E, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x03, 0x30, 0x34, 0x30, 0x30, 0x30, 0x71,
+        0x30, 0x30, 0x17, 0xE8, 0x33, 0x5A, 0x31, 0x30, 0x30, 0x30, 0x30, 0x35, 0x31, 0x20, 0x20,
+        0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01,
+        0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x38, 0x38, 0x37, 0x37, 0x37, 0x35, 0x37, 0x21, 0x3E, 0x61, 0x6D, 0x66, 0x76, 0x3B, 0x0A,
+        0x2F, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        0x20, 0x0F, 0x01, 0x00, 0x00, 0x31, 0x31, 0x31, 0x00, 0x0E, 0x30, 0x30, 0x30, 0x30, 0x30,
+        0x30, 0x03, 0x30, 0x38, 0x30, 0x30, 0x30, 0x72, 0x30, 0x30, 0x17, 0xE8, 0x36, 0x4E, 0x31,
+        0x30, 0x30, 0x30, 0x30, 0x33, 0x31, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        0x01, 0x00, 0x00, 0x00, 0x01, 0x34, 0x37, 0x35, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36,
+        0x37, 0x33, 0x37, 0x34, 0x33, 0x32, 0x38, 0x35, 0x32, 0x34, 0x33, 0x38, 0x32, 0x35, 0x33,
+        0x14, 0x34,
+    ];
+
+    #[test]
+    fn parse_name_index_too_small() {
+        let res = Archive::parse(&MALFORMED_ARCHIVE_INDEX_TOO_SMALL);
+        assert_eq!(res.is_err(), true);
+        if let Err(Error::Malformed(msg)) = res {
+            assert_eq!(msg, "Size (0x1) too small");
+        } else {
+            panic!("Expected a Malformed error but got {:?}", res);
+        }
+    }
+
+    #[test]
+    fn parse_malformed_archive() {
+        let res = Archive::parse(&MALFORMED_ARCHIVE);
+        assert_eq!(res.is_err(), true);
+        match res {
+            Err(error::Error::BufferTooShort(num_member, msg)) => {
+                assert_eq!(num_member, 1);
+                assert_eq!(msg, "members");
+            }
+            _ => panic!("Expected a BufferTooShort error but got {:?}", res),
+        }
     }
 }

@@ -42,13 +42,17 @@
 //!                 Object::PE(pe) => {
 //!                     println!("pe: {:#?}", &pe);
 //!                 },
+//!                 Object::COFF(coff) => {
+//!                     println!("coff: {:#?}", &coff);
+//!                 },
 //!                 Object::Mach(mach) => {
 //!                     println!("mach: {:#?}", &mach);
 //!                 },
 //!                 Object::Archive(archive) => {
 //!                     println!("archive: {:#?}", &archive);
 //!                 },
-//!                 Object::Unknown(magic) => { println!("unknown magic: {:#x}", magic) }
+//!                 Object::Unknown(magic) => { println!("unknown magic: {:#x}", magic) },
+//!                 _ => { }
 //!             }
 //!         }
 //!     }
@@ -106,7 +110,7 @@ macro_rules! if_alloc {
 
 #[cfg(feature = "alloc")]
 pub mod error;
-
+pub mod options;
 pub mod strtab;
 
 /// Binary container size information and byte-order context
@@ -201,37 +205,48 @@ pub mod container {
     }
 }
 
+/// Takes a reference to the first 16 bytes of the total bytes slice and convert it to an array for `peek_bytes` to use.
+/// Returns None if bytes's length is less than 16.
+#[allow(unused)]
+fn take_hint_bytes(bytes: &[u8]) -> Option<&[u8; 16]> {
+    bytes
+        .get(0..16)
+        .and_then(|hint_bytes_slice| hint_bytes_slice.try_into().ok())
+}
+
+#[derive(Debug, Default)]
+/// Information obtained from a peek `Hint`
+pub struct HintData {
+    pub is_lsb: bool,
+    pub is_64: Option<bool>,
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+/// A hint at the underlying binary format for 16 bytes of arbitrary data
+pub enum Hint {
+    Elf(HintData),
+    Mach(HintData),
+    MachFat(usize),
+    PE,
+    TE,
+    COFF,
+    Archive,
+    Unknown(u64),
+}
+
 macro_rules! if_everything {
     ($($i:item)*) => ($(
-        #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "mach64", feature = "mach32", feature = "archive"))]
+        #[cfg(all(feature = "endian_fd", feature = "elf64", feature = "elf32", feature = "pe64", feature = "pe32", feature = "te", feature = "mach64", feature = "mach32", feature = "archive"))]
         $i
     )*)
 }
 
 if_everything! {
 
-    #[derive(Debug, Default)]
-    /// Information obtained from a peek `Hint`
-    pub struct HintData {
-        pub is_lsb: bool,
-        pub is_64: Option<bool>,
-    }
-
-    #[derive(Debug)]
-    /// A hint at the underlying binary format for 16 bytes of arbitrary data
-    pub enum Hint {
-        Elf(HintData),
-        Mach(HintData),
-        MachFat(usize),
-        PE,
-        Archive,
-        Unknown(u64),
-    }
-
     /// Peeks at `bytes`, and returns a `Hint`
     pub fn peek_bytes(bytes: &[u8; 16]) -> error::Result<Hint> {
-        use scroll::{Pread, LE, BE};
-        use crate::mach::{fat, header};
+        use scroll::{Pread, LE};
         if &bytes[0..elf::header::SELFMAG] == elf::header::ELFMAG {
             let class = bytes[elf::header::EI_CLASS];
             let is_lsb = bytes[elf::header::EI_DATA] == elf::header::ELFDATA2LSB;
@@ -245,25 +260,14 @@ if_everything! {
             Ok(Hint::Elf(HintData { is_lsb, is_64 }))
         } else if &bytes[0..archive::SIZEOF_MAGIC] == archive::MAGIC {
             Ok(Hint::Archive)
-        } else if (&bytes[0..2]).pread_with::<u16>(0, LE)? == pe::header::DOS_MAGIC {
-            Ok(Hint::PE)
         } else {
-            let (magic, maybe_ctx) = mach::parse_magic_and_ctx(bytes, 0)?;
-            match magic {
-                fat::FAT_MAGIC => {
-                    // should probably verify this is always Big Endian...
-                    let narchitectures = bytes.pread_with::<u32>(4, BE)? as usize;
-                    Ok(Hint::MachFat(narchitectures))
-                },
-                header::MH_CIGAM_64 | header::MH_CIGAM | header::MH_MAGIC_64 | header::MH_MAGIC => {
-                    if let Some(ctx) = maybe_ctx {
-                        Ok(Hint::Mach(HintData { is_lsb: ctx.le.is_little(), is_64: Some(ctx.container.is_big()) }))
-                    } else {
-                        Err(error::Error::Malformed(format!("Correct mach magic {:#x} does not have a matching parsing context!", magic)))
-                    }
-                },
-                // its something else
-                _ => Ok(Hint::Unknown(bytes.pread::<u64>(0)?))
+            match *&bytes[0..2].pread_with::<u16>(0, LE)? {
+                pe::header::DOS_MAGIC => Ok(Hint::PE),
+                pe::header::TE_MAGIC => Ok(Hint::TE),
+                pe::header::COFF_MACHINE_X86 |
+                pe::header::COFF_MACHINE_X86_64 |
+                pe::header::COFF_MACHINE_ARM64 => Ok(Hint::COFF),
+                _ => mach::peek_bytes(bytes)
             }
         }
     }
@@ -279,24 +283,19 @@ if_everything! {
         peek_bytes(&bytes)
     }
 
-    /// Takes a reference to the first 16 bytes of the total bytes slice and convert it to an array for `peek_bytes` to use.
-    /// Returns None if bytes's length is less than 16.
-    fn take_hint_bytes(bytes: &[u8]) -> Option<&[u8; 16]> {
-        use core::convert::TryInto;
-        bytes.get(0..16)
-            .and_then(|hint_bytes_slice| {
-                hint_bytes_slice.try_into().ok()
-            })
-    }
-
     #[derive(Debug)]
     #[allow(clippy::large_enum_variant)]
+    #[non_exhaustive]
     /// A parseable object that goblin understands
     pub enum Object<'a> {
         /// An ELF32/ELF64!
         Elf(elf::Elf<'a>),
         /// A PE32/PE32+!
         PE(pe::PE<'a>),
+        /// A TE!
+        TE(pe::TE<'a>),
+        /// A COFF
+        COFF(pe::Coff<'a>),
         /// A 32/64-bit Mach-o binary _OR_ it is a multi-architecture binary container!
         Mach(mach::Mach<'a>),
         /// A Unix archive
@@ -307,14 +306,16 @@ if_everything! {
 
     impl<'a> Object<'a> {
         /// Tries to parse an `Object` from `bytes`
-        pub fn parse(bytes: &[u8]) -> error::Result<Object> {
+        pub fn parse(bytes: &[u8]) -> error::Result<Object<'_>> {
             if let Some(hint_bytes) = take_hint_bytes(bytes) {
                 match peek_bytes(hint_bytes)? {
                     Hint::Elf(_) => Ok(Object::Elf(elf::Elf::parse(bytes)?)),
                     Hint::Mach(_) | Hint::MachFat(_) => Ok(Object::Mach(mach::Mach::parse(bytes)?)),
                     Hint::Archive => Ok(Object::Archive(archive::Archive::parse(bytes)?)),
                     Hint::PE => Ok(Object::PE(pe::PE::parse(bytes)?)),
-                    Hint::Unknown(magic) => Ok(Object::Unknown(magic))
+                    Hint::TE => Ok(Object::TE(pe::TE::parse(bytes)?)),
+                    Hint::COFF => Ok(Object::COFF(pe::Coff::parse(bytes)?)),
+                    Hint::Unknown(magic) => Ok(Object::Unknown(magic)),
                 }
             } else {
                 Err(error::Error::Malformed(format!("Object is too small.")))

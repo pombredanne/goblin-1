@@ -2,11 +2,11 @@
 //!
 
 use alloc::string::String;
+use core::error;
 use core::fmt;
+use core::num::TryFromIntError;
 use core::result;
-#[cfg(feature = "std")]
-use std::{error, io};
-
+#[non_exhaustive]
 #[derive(Debug)]
 /// A custom Goblin error
 pub enum Error {
@@ -18,25 +18,32 @@ pub enum Error {
     Scroll(scroll::Error),
     /// An IO based error
     #[cfg(feature = "std")]
-    IO(io::Error),
+    IO(std::io::Error),
+    /// Buffer is too short to hold N items
+    BufferTooShort(usize, &'static str),
 }
 
-#[cfg(feature = "std")]
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
+            #[cfg(feature = "std")]
             Error::IO(ref io) => Some(io),
             Error::Scroll(ref scroll) => Some(scroll),
-            Error::BadMagic(_) => None,
-            Error::Malformed(_) => None,
+            _ => None,
         }
     }
 }
 
 #[cfg(feature = "std")]
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Error {
         Error::IO(err)
+    }
+}
+
+impl From<TryFromIntError> for Error {
+    fn from(err: TryFromIntError) -> Error {
+        Error::Malformed(format!("Integer do not fit: {err}"))
     }
 }
 
@@ -54,6 +61,7 @@ impl fmt::Display for Error {
             Error::Scroll(ref err) => write!(fmt, "{}", err),
             Error::BadMagic(magic) => write!(fmt, "Invalid magic number: 0x{:x}", magic),
             Error::Malformed(ref msg) => write!(fmt, "Malformed entity: {}", msg),
+            Error::BufferTooShort(n, item) => write!(fmt, "Buffer is too short for {} {}", n, item),
         }
     }
 }

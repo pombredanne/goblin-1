@@ -333,7 +333,9 @@ pub const EM_BA2: u16 = 202;
 pub const EM_XCORE: u16 = 203;
 /// Microchip 8-bit PIC(r)
 pub const EM_MCHP_PIC: u16 = 204;
-// reserved 205-209
+/// Intel Graphics Technology
+pub const EM_INTELGT: u16 = 205;
+// reserved 206-209
 /// KM211 KM32
 pub const EM_KM32: u16 = 210;
 /// KM211 KMX32
@@ -371,10 +373,16 @@ pub const EM_RISCV: u16 = 243;
 /// Linux BPF -- in-kernel virtual machine
 pub const EM_BPF: u16 = 247;
 
+/// C-SKY
+pub const EM_CSKY: u16 = 252;
+
+// Loongarch 64
+pub const EM_LOONGARCH: u16 = 258;
+
 pub const EM_NUM: u16 = 248;
 
 /// Convert machine to str representation
-pub fn machine_to_str (machine: u16) -> &'static str {
+pub fn machine_to_str(machine: u16) -> &'static str {
     match machine {
         EM_M32 => "M32",
         EM_SPARC => "SPARC",
@@ -553,6 +561,7 @@ pub fn machine_to_str (machine: u16) -> &'static str {
         EM_AMDGPU => "AMDGPU",
         EM_RISCV => "RISCV",
         EM_BPF => "BPF",
+        EM_LOONGARCH => "LOONGARCH",
         _val => "EM_UNKNOWN",
     }
 }

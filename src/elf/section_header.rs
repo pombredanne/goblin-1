@@ -187,8 +187,8 @@ pub const SHF_MASKPROC: u32 = 0xf000_0000;
 pub const SHF_ORDERED: u32 = 1 << 30;
 /// Number of "regular" section header flags
 pub const SHF_NUM_REGULAR_FLAGS: usize = 12;
-// /// Section is excluded unless referenced or allocated (Solaris).
-// pub const SHF_EXCLUDE: u32 = 1U << 31;
+/// Section is excluded unless referenced or allocated (Solaris).
+pub const SHF_EXCLUDE: u32 = 0x80000000; // 1U << 31
 
 pub const SHF_FLAGS: [u32; SHF_NUM_REGULAR_FLAGS] = [
     SHF_WRITE,
@@ -370,7 +370,8 @@ pub mod section_header64 {
 ///////////////////////////////
 
 if_alloc! {
-    use crate::error;
+    use crate::error::{self};
+    use crate::options::Permissive;
     use core::fmt;
     use core::result;
     use core::ops::Range;
@@ -406,7 +407,7 @@ if_alloc! {
     }
 
     impl SectionHeader {
-        /// Return the size of the underlying program header, given a `container`
+        /// Return the size of the underlying section header, given a `Ctx`
         #[inline]
         pub fn size(ctx: Ctx) -> usize {
             use scroll::ctx::SizeWith;
@@ -442,25 +443,31 @@ if_alloc! {
             self.sh_addr as usize..(self.sh_addr as usize).saturating_add(self.sh_size as usize)
         }
         /// Parse `count` section headers from `bytes` at `offset`, using the given `ctx`
+        /// Assuming this is read from the whole file, it will check offset.
         #[cfg(feature = "endian_fd")]
-        pub fn parse(bytes: &[u8], mut offset: usize, mut count: usize, ctx: Ctx) -> error::Result<Vec<SectionHeader>> {
-            use scroll::Pread;
+        pub fn parse(bytes: &[u8], offset: usize, count: usize, ctx: Ctx) -> error::Result<Vec<SectionHeader>> {
             // Zero offset means no section headers, not even the null section header.
             if offset == 0 {
                 return Ok(Vec::new());
             }
+            Self::parse_from(bytes, offset, count, ctx)
+        }
+        /// Parse `count` section headers from `bytes` at `offset`, using the given `ctx`
+        /// without performing any offset checking to allow parsing relatively
+        #[cfg(feature = "endian_fd")]
+        pub fn parse_from(bytes: &[u8], mut offset: usize, mut count: usize, ctx: Ctx) -> error::Result<Vec<SectionHeader>> {
+            use scroll::Pread;
             let empty_sh = bytes.gread_with::<SectionHeader>(&mut offset, ctx)?;
             if count == 0 as usize {
-                // Zero count means either no section headers if offset is also zero (checked
-                // above), or the number of section headers overflows SHN_LORESERVE, in which
-                // case the count is stored in the sh_size field of the null section header.
+                // Zero count means either no section headers or the number of section headers
+                // overflows SHN_LORESERVE, in which case the count is stored in the sh_size field
+                // of the null section header.
                 count = empty_sh.sh_size as usize;
             }
 
             // Sanity check to avoid OOM
             if count > bytes.len() / Self::size(ctx) {
-                let message = format!("Buffer is too short for {} section headers", count);
-                return Err(error::Error::Malformed(message));
+                return Err(error::Error::BufferTooShort(count, "section headers"));
             }
             let mut section_headers = Vec::with_capacity(count);
             section_headers.push(empty_sh);
@@ -471,20 +478,26 @@ if_alloc! {
             Ok(section_headers)
         }
         pub fn check_size(&self, size: usize) -> error::Result<()> {
-            if self.sh_type == SHT_NOBITS {
+            self.check_size_with_opts(size, false)
+        }
+
+        pub(crate) fn check_size_with_opts(&self, size: usize, permissive: bool) -> error::Result<()> {
+            if self.sh_type == SHT_NOBITS || self.sh_size == 0 {
                 return Ok(());
             }
             let (end, overflow) = self.sh_offset.overflowing_add(self.sh_size);
             if overflow || end > size as u64 {
                 let message = format!("Section {} size ({}) + offset ({}) is out of bounds. Overflowed: {}",
                     self.sh_name, self.sh_offset, self.sh_size, overflow);
-                return Err(error::Error::Malformed(message));
+                return Err(error::Error::Malformed(message))
+                    .or_permissive_and_value(permissive, "Malformed section header", ());
             }
             let (_, overflow) = self.sh_addr.overflowing_add(self.sh_size);
             if overflow {
                 let message = format!("Section {} size ({}) + addr ({}) is out of bounds. Overflowed: {}",
                     self.sh_name, self.sh_addr, self.sh_size, overflow);
-                return Err(error::Error::Malformed(message));
+                return Err(error::Error::Malformed(message))
+                    .or_permissive_and_value(permissive, "Malformed section header", ());
             }
             Ok(())
         }
